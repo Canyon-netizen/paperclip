@@ -4389,12 +4389,36 @@ export async function ensurePaperclipSkillSymlink(
     .then(() => true)
     .catch(() => false);
   if (linkedPathExists) {
+    // A link that points at another materialised version of the same skill is
+    // stale: the pin moved, and the runtime has to serve the pinned version.
+    // Leaving it in place makes the reconciliation report the skill as
+    // "occupied by another installation" and fails the run before the provider
+    // is ever reached.
+    if (isMaterialisedVersionOfSameSkill(resolvedLinkedPath, source)) {
+      await fs.unlink(target);
+      await linkSkill(source, target);
+      return "repaired";
+    }
     return "skipped";
   }
 
   await fs.unlink(target);
   await linkSkill(source, target);
   return "repaired";
+}
+
+/**
+ * True when both paths are materialised versions of the same skill.
+ *
+ * The managed skills live under `<root>/__versions__/<skillId>/<versionId>`, so
+ * two paths share a parent directory exactly when they are two versions of one
+ * skill. A link across different parents belongs to another installation and
+ * must be left alone.
+ */
+function isMaterialisedVersionOfSameSkill(linkedPath: string, source: string): boolean {
+  const linkedDir = path.dirname(linkedPath);
+  if (linkedDir !== path.dirname(source)) return false;
+  return path.basename(path.dirname(linkedDir)) === "__versions__";
 }
 
 async function hashSkillDirectory(root: string): Promise<string> {
