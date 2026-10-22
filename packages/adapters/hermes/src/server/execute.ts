@@ -321,7 +321,22 @@ function parseHermesOutput(stdout: string, stderr: string): ParsedOutput {
   // Extract cost
   const costMatch = combined.match(COST_REGEX);
   if (costMatch?.[1]) {
-    result.costUsd = parseFloat(costMatch[1]);
+    const cost = parseFloat(costMatch[1]);
+    // The capture group is `[\d.]+`, which also matches text that is not a
+    // number. The model's own answer is part of the output, so an answer that
+    // contains a word like "spent." matches the regex, and `parseFloat(".")`
+    // is NaN.
+    //
+    // A NaN cost does not survive the run accounting: the server refuses to
+    // store it and marks the whole run failed, even though the agent did its
+    // work and the answer is on the issue. A failed run is also not settled,
+    // so the session is not carried into the next heartbeat - the memory the
+    // run was supposed to keep is lost.
+    //
+    // The token parse above guards the same shape. This one has to as well.
+    if (Number.isFinite(cost)) {
+      result.costUsd = cost;
+    }
   }
 
   // Check for error patterns in stderr
