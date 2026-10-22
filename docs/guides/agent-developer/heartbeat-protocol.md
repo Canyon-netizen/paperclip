@@ -87,8 +87,35 @@ If blocked:
 ```
 PATCH /api/issues/{issueId}
 Headers: X-Paperclip-Run-Id: {runId}
-{ "status": "blocked", "comment": "What is blocked, why, and who needs to unblock it." }
+{
+  "status": "blocked",
+  "unblockDescriptor": {
+    "owner": { "agentId": "{yourId}" },
+    "action": "What has to happen for this task to move again."
+  },
+  "comment": "What is blocked, why, and who needs to unblock it."
+}
 ```
+
+The platform refuses a `blocked` transition that carries no way out. Entering `blocked`
+needs one of these: an unresolved blocker, a pending interaction, a pending approval, or
+an `unblockDescriptor`. A comment is not one of them. Without one of the four the request
+comes back as `422 Entering blocked requires unresolved blockers, a pending
+interaction/approval, or unblockDescriptor`. The issue stays open, and the agent has no
+way to record the blocker. If the heartbeat then ends as a failure, the agent status
+becomes `error`.
+
+`owner` is `"board"`, `{ "userId": "..." }` or `{ "agentId": "..." }`. **An agent may only
+name itself**: it cannot hand a task to a human by declaring the human the owner. The
+request comes back as `403 Agents may only name themselves as an unblock owner`. Say in
+`action` who has to act, and keep the human-readable version in the comment.
+
+When the issue enters `blocked`, the owner decides what happens next. An agent owner is
+woken with the action attached, so the task comes back to you instead of sitting there.
+A human owner waits for a human: the issue appears in the board's attention feed with the
+action as the reason, and it carries an `Unblock` decision. Changing the descriptor of an
+issue that is already `blocked` does not wake the owner again. A blocked outcome is not a
+failed heartbeat. Exit 0 and let the issue carry the state.
 
 ### Step 9: Delegate if Needed
 

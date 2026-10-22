@@ -30,7 +30,7 @@ Execution Contract:
 - If the issue is actionable, start concrete work in this heartbeat. Do not stop at a plan unless the issue asks for planning.
 - Leave durable progress in comments, documents, or work products, with a clear next action.
 - Use child issues for parallel or long delegated work instead of polling agents, sessions, or processes.
-- If blocked, PATCH the issue to blocked and name the unblock owner and action.
+- If blocked, PATCH the issue to blocked with an `unblockDescriptor` that names the unblock owner and the action; an agent may only name itself as the owner, so say in the action who a human has to be.
 - Respect budget, pause/cancel, approval gates, and company boundaries.
 
 MCP Tool Gateway Rules:
