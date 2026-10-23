@@ -10,31 +10,49 @@ const { mocks, testHome } = await vi.hoisted(async () => {
   ]);
   const home = nodePath.join(os.tmpdir(), `paperclip-pi-bootstrap-${process.pid}-${Date.now()}`);
   process.env.HOME = home;
+  const behavior = { kind: "ok" as "ok" | "spawn_refused" | "start_then_fail" };
+  const piStdout = JSON.stringify({
+    type: "turn_end",
+    message: {
+      role: "assistant",
+      content: "done",
+      usage: { input: 10, output: 20, cacheRead: 0, cost: { total: 0.01 } },
+    },
+    toolResults: [],
+  });
   return {
     testHome: home,
     mocks: {
+      behavior,
       ensureAdapterExecutionTargetCommandResolvable: vi.fn(async () => undefined),
       ensureAdapterExecutionTargetRuntimeCommandInstalled: vi.fn(async () => undefined),
       ensurePiModelConfiguredAndAvailable: vi.fn(async () => [
         { id: "openai/gpt-5.4-mini", label: "openai/gpt-5.4-mini" },
       ]),
-      runAdapterExecutionTargetProcess: vi.fn(async () => ({
-        exitCode: 0,
-        signal: null,
-        timedOut: false,
-        stdout: JSON.stringify({
-          type: "turn_end",
-          message: {
-            role: "assistant",
-            content: "done",
-            usage: { input: 10, output: 20, cacheRead: 0, cost: { total: 0.01 } },
-          },
-          toolResults: [],
-        }),
-        stderr: "",
-        pid: 4242,
-        startedAt: new Date().toISOString(),
-      })),
+      runAdapterExecutionTargetProcess: vi.fn(async (
+        _runId: string,
+        _target: unknown,
+        _command: string,
+        _args: string[],
+        options: { onSpawn?: (meta: { pid: number; processGroupId: number | null; startedAt: string }) => Promise<void> },
+      ) => {
+        if (behavior.kind === "spawn_refused") {
+          throw Object.assign(new Error("spawn pi EAGAIN"), { code: "EAGAIN" });
+        }
+        if (behavior.kind === "start_then_fail") {
+          await options.onSpawn?.({ pid: 4242, processGroupId: null, startedAt: new Date().toISOString() });
+          throw new Error("provider process crashed");
+        }
+        return {
+          exitCode: 0,
+          signal: null,
+          timedOut: false,
+          stdout: piStdout,
+          stderr: "",
+          pid: 4242,
+          startedAt: new Date().toISOString(),
+        };
+      }),
     },
   };
 });
@@ -63,28 +81,12 @@ describe("pi pre-provider failure accounting", () => {
 
   beforeEach(async () => {
     workspaceDir = await mkdtemp(path.join(os.tmpdir(), "paperclip-pi-bootstrap-workspace-"));
+    mocks.behavior.kind = "ok";
     mocks.ensureAdapterExecutionTargetCommandResolvable.mockResolvedValue(undefined);
     mocks.ensureAdapterExecutionTargetRuntimeCommandInstalled.mockResolvedValue(undefined);
     mocks.ensurePiModelConfiguredAndAvailable.mockResolvedValue([
       { id: "openai/gpt-5.4-mini", label: "openai/gpt-5.4-mini" },
     ]);
-    mocks.runAdapterExecutionTargetProcess.mockResolvedValue({
-      exitCode: 0,
-      signal: null,
-      timedOut: false,
-      stdout: JSON.stringify({
-        type: "turn_end",
-        message: {
-          role: "assistant",
-          content: "done",
-          usage: { input: 10, output: 20, cacheRead: 0, cost: { total: 0.01 } },
-        },
-        toolResults: [],
-      }),
-      stderr: "",
-      pid: 4242,
-      startedAt: new Date().toISOString(),
-    });
   });
 
   afterEach(async () => {
@@ -141,8 +143,21 @@ describe("pi pre-provider failure accounting", () => {
     });
   });
 
-  it("keeps a provider-side failure unproven so accounting never invents a free run", async () => {
-    mocks.runAdapterExecutionTargetProcess.mockRejectedValueOnce(new Error("provider process crashed"));
+  it("reports a refused process start as a pre-provider failure", async () => {
+    mocks.behavior.kind = "spawn_refused";
+
+    const result = await execute(context());
+
+    expect(result).toMatchObject({
+      errorCode: "pi_bootstrap_failed",
+      errorFamily: "transient_upstream",
+      executionRecovery: { kind: "bootstrap", providerWorkStarted: false },
+    });
+    expect(result.errorMessage).toContain("EAGAIN");
+  });
+
+  it("keeps a failure after the provider process started unproven", async () => {
+    mocks.behavior.kind = "start_then_fail";
 
     await expect(execute(context())).rejects.toThrow("provider process crashed");
   });
