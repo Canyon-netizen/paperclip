@@ -85,10 +85,12 @@ describe("paperclip skill helpers and the run id header", () => {
     return { file, sha256: createHash("sha256").update(body).digest("hex"), stateDir };
   }
 
-  async function startApi(options: {
-    uploadedAttachment?: AttachmentPayload;
-    existingAttachments?: AttachmentPayload[];
-  }): Promise<{ baseUrl: string; requests: RecordedRequest[] }> {
+  async function startApi(
+    options: {
+      uploadedAttachment?: AttachmentPayload;
+      existingAttachments?: AttachmentPayload[];
+    } = {},
+  ): Promise<{ baseUrl: string; requests: RecordedRequest[] }> {
     const requests: RecordedRequest[] = [];
     const server = http.createServer((req, res) => {
       let body = "";
