@@ -735,7 +735,9 @@ describe("OnboardingWizard restore-gate (stale localStorage across accounts)", (
     it.each([false, true])("shows manual CLI debugging only outside managed Cloud (managed: %s)", async managed => {
       localHealth.get.mockResolvedValue({ deploymentMode: "authenticated", ...(managed ? { cloud: { managed: true, managedBy: "paperclip-cloud" } } : {}) });
       mockAgentsApi.testEnvironment.mockResolvedValue({ adapterType: "claude_local", status: "fail", testedAt: new Date().toISOString(),
-        checks: [{ code: "claude_hello_probe_failed", level: "error", message: "The runtime test did not finish." }] });
+        checks: [{ code: "claude_hello_probe_failed", level: "error", message: "The runtime test did not finish.",
+          detail: "The provider exited with code 1.",
+          hint: "Exit code 1. Run `claude --print - --output-format stream-json --verbose` manually in this directory and prompt `Respond with hello` to debug." }] });
       mockCompaniesApi.create.mockResolvedValue({ id: "company-new", issuePrefix: "INI" });
       const { root } = await openStepOne();
       try {
@@ -746,6 +748,8 @@ describe("OnboardingWizard restore-gate (stale localStorage across accounts)", (
         await pickFirstSource(clickByText);
         await clickByText(isArcPrimary);
         expect(document.body.textContent).toContain("The runtime test did not finish.");
+        expect(document.body.textContent).toContain("The provider exited with code 1.");
+        expect(document.body.textContent?.includes("manually in this directory")).toBe(!managed);
         expect(document.body.textContent?.includes("Manual debug")).toBe(!managed);
         expect(document.body.textContent?.includes("--output-format stream-json")).toBe(!managed);
         expect(document.body.textContent?.includes("Fix the reported checks")).toBe(!managed);

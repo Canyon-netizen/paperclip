@@ -2111,7 +2111,8 @@ image's global CLI or change the model, account, or execution engine. Compatible
 private installations are reused. Custom commands, local and SSH targets retain
 their existing operator-managed version checks. Installation failure or an
 unverified version still blocks launch. Cloud onboarding omits manual shell
-debugging instructions; self-hosted onboarding retains them after deployment
+debugging instructions and legacy operator hints while retaining check messages
+and details; self-hosted onboarding retains that guidance after deployment
 metadata is known.
 
 For fast sandbox startup, bake `paperclip-runnerd` and the latest stable agent

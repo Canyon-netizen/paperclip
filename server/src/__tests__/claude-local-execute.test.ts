@@ -1058,6 +1058,7 @@ describe("claude execute", () => {
     const preparedCommand = path.join(remoteWorkspace, ".paperclip-runtime/claude-cli/2.1.280/bin/claude");
     const logs: string[] = [];
     const commands: string[] = [];
+    const loggedCommands: string[] = [];
     try {
       await fs.writeFile(commandPath, (await fs.readFile(commandPath, "utf8")).replace("2.1.286", "2.1.263"));
       await fs.mkdir(remoteWorkspace, { recursive: true });
@@ -1080,13 +1081,14 @@ describe("claude execute", () => {
             return runner.execute(input);
           } } },
         authToken: "run-jwt-token", onLog: async (_stream, chunk) => { logs.push(chunk); },
-        onMeta: async meta => { commands.push(meta.command); },
+        onMeta: async meta => { commands.push(meta.command); loggedCommands.push(meta.env.PAPERCLIP_RESOLVED_COMMAND); },
       });
       if (state === "compatible") {
         expect(result.exitCode).toBe(0);
         const capture = JSON.parse(await fs.readFile(capturePath, "utf8")) as CapturePayload;
         expect(capture.argv).toEqual(expect.arrayContaining(["--effort", "high"]));
         expect(commands).toContain(preparedCommand);
+        expect(loggedCommands).toEqual(commands);
         expect(logs.join("")).not.toContain("omitting configured effort");
       } else {
         expect(result.errorCode).toBe("claude_cli_version_incompatible");

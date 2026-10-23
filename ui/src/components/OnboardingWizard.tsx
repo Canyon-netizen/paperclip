@@ -3317,10 +3317,10 @@ function OnboardingWizardInner({
                           </div>
                           {/* Show the checks on a pass too, so the target and the
                               auth signals stay visible before the hire. */}
-                          <AdapterEnvironmentResult result={adapterEnvResult} />
+                          <AdapterEnvironmentResult result={adapterEnvResult} showHints={localLoginHealth.isSuccess && !cloudInstance} />
                         </div>
                       ) : adapterEnvResult ? (
-                        <AdapterEnvironmentResult result={adapterEnvResult} />
+                        <AdapterEnvironmentResult result={adapterEnvResult} showHints={localLoginHealth.isSuccess && !cloudInstance} />
                       ) : null}
 
                       {shouldSuggestUnsetAnthropicApiKey && (
@@ -3516,9 +3516,11 @@ function OnboardingWizardInner({
 }
 
 function AdapterEnvironmentResult({
-  result
+  result,
+  showHints,
 }: {
   result: AdapterEnvironmentTestResult;
+  showHints: boolean;
 }) {
   const statusLabel =
     result.status === "pass"
@@ -3557,7 +3559,7 @@ function AdapterEnvironmentResult({
                 ({check.detail})
               </span>
             )}
-            {check.hint && (
+            {showHints && check.hint && (
               <span className="block opacity-90 break-words">
                 Hint: {check.hint}
               </span>

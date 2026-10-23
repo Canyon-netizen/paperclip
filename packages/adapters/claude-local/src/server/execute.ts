@@ -1313,6 +1313,11 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
       }
       command = prepared.command;
       resolvedCommand = prepared.command === "claude" ? resolvedCommand : prepared.command;
+      loggedEnv = buildInvocationEnvForLogs(env, {
+        runtimeEnv: loggedEnv,
+        includeRuntimeKeys: ["HOME", "CLAUDE_CONFIG_DIR"],
+        resolvedCommand,
+      });
       const detectedCliVersion = prepared.version;
       if (
         !detectedCliVersion ||
