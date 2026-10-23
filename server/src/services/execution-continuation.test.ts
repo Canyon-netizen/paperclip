@@ -633,6 +633,29 @@ const support = await getEmbeddedPostgresTestSupport();
           .where(inArray(issueComments.id, [requestId, ...progressIds]));
       }
     });
+  it("keeps a request from a comment without an author type as the objective", async () => {
+      const legacyRequestId = randomUUID();
+      await db.insert(issueComments).values({
+        id: legacyRequestId,
+        companyId,
+        issueId,
+        authorUserId: "local-board",
+        body: "Ship the release notes today.",
+        createdAt: new Date(Date.UTC(2026, 11, 6, 0, 0, 0)),
+      });
+      try {
+        const envelope = await build();
+        expect(envelope.objective).toBe("Ship the release notes today.");
+        expect(envelope.objectiveSource).toMatchObject({
+          kind: "comment",
+          id: legacyRequestId,
+        });
+      } finally {
+        await db
+          .delete(issueComments)
+          .where(eq(issueComments.id, legacyRequestId));
+      }
+    });
   },
 );
 

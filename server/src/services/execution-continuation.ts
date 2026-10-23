@@ -449,7 +449,7 @@ export async function buildExecutionContinuation(input: {
       and(
         eq(issueComments.companyId, companyId),
         eq(issueComments.issueId, issueId),
-        eq(issueComments.authorType, "user"),
+        sql`(${issueComments.authorType} = 'user' or (${issueComments.authorType} is null and ${issueComments.authorUserId} is not null))`,
         isNull(issueComments.createdByRunId),
         isNull(issueComments.deletedAt),
         sql`length(trim(${issueComments.body})) > 0`,
