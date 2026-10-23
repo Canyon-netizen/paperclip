@@ -11361,8 +11361,13 @@ export function issueRoutes(
           ? (createInput.metadata as Record<string, unknown> | null)
               ?.attachmentId
           : null;
-      const existingRunAttachmentProduct =
-        typeof attachmentId === "string" && createdByRunId
+      const attachmentWorkProductId =
+        typeof attachmentId === "string" ? attachmentId : null;
+      if (attachmentWorkProductId && !createInput.externalId) {
+        createInput.externalId = attachmentWorkProductId;
+      }
+      const existingAttachmentProduct =
+        attachmentWorkProductId
           ? await db
               .select({ id: issueWorkProducts.id })
               .from(issueWorkProducts)
@@ -11372,16 +11377,18 @@ export function issueRoutes(
                   eq(issueWorkProducts.issueId, issue.id),
                   eq(issueWorkProducts.type, "artifact"),
                   eq(issueWorkProducts.provider, "paperclip"),
-                  eq(issueWorkProducts.externalId, attachmentId),
-                  eq(issueWorkProducts.createdByRunId, createdByRunId),
+                  eq(issueWorkProducts.externalId, attachmentWorkProductId),
+                  createdByRunId
+                    ? eq(issueWorkProducts.createdByRunId, createdByRunId)
+                    : isNull(issueWorkProducts.createdByRunId),
                 ),
               )
               .limit(1)
               .then((rows) => rows[0] ?? null)
           : null;
-      const product = existingRunAttachmentProduct
+      const product = existingAttachmentProduct
         ? await workProductsSvc.update(
-            existingRunAttachmentProduct.id,
+            existingAttachmentProduct.id,
             createInput,
           )
         : await workProductsSvc.createForIssue(
