@@ -11,7 +11,7 @@
  * the server already understands, so the run can be settled.
  */
 
-import { describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -31,6 +31,8 @@ vi.mock("@paperclipai/adapter-utils/server-utils", async (importOriginal) => {
     })),
   };
 });
+
+import { runChildProcess } from "@paperclipai/adapter-utils/server-utils";
 
 import { execute } from "./execute.js";
 
@@ -68,6 +70,10 @@ function makeCtx(config: Record<string, unknown>, onLog: (stream: string, chunk:
 }
 
 describe("hermes-local adapter: the skills cannot be reconciled", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
   it("reports the failure with the no-provider-work proof instead of throwing", async () => {
     const home = await fs.mkdtemp(path.join(os.tmpdir(), "hermes-skills-"));
     try {
@@ -99,6 +105,10 @@ describe("hermes-local adapter: the skills cannot be reconciled", () => {
       expect(result.exitCode).toBe(1);
       expect(result.errorMessage).toContain("Hermes cannot start");
       expect(logs.join("\n")).toContain("Cannot start without the required Paperclip-managed skills");
+      // The proof the server settles the run on says the provider was never
+      // reached. Assert it here too: a mock that silently succeeds would let a
+      // future change start Hermes before the reconciliation and still pass.
+      expect(runChildProcess).not.toHaveBeenCalled();
     } finally {
       await fs.rm(home, { recursive: true, force: true });
     }
