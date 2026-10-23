@@ -224,7 +224,39 @@ async function readSavedSessionCwd(input: {
   }
 }
 
+type PiProviderDispatch = { providerDispatchStarted: boolean };
+
+function piPreProviderFailure(error: unknown): AdapterExecutionResult {
+  const message = error instanceof Error ? error.message : String(error);
+  return {
+    exitCode: 1,
+    signal: null,
+    timedOut: false,
+    errorMessage: message,
+    errorCode: "pi_bootstrap_failed",
+    errorFamily: /timed out|temporarily/i.test(message) ? "transient_upstream" : "configuration",
+    usageComplete: false,
+    executionRecovery: { kind: "bootstrap", providerWorkStarted: false },
+    resultJson: { phase: "bootstrap", providerWorkStarted: false },
+    summary: message,
+    clearSession: false,
+  };
+}
+
 export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExecutionResult> {
+  const dispatch: PiProviderDispatch = { providerDispatchStarted: false };
+  try {
+    return await executeProviderWork(ctx, dispatch);
+  } catch (error) {
+    if (dispatch.providerDispatchStarted) throw error;
+    return piPreProviderFailure(error);
+  }
+}
+
+async function executeProviderWork(
+  ctx: AdapterExecutionContext,
+  dispatch: PiProviderDispatch,
+): Promise<AdapterExecutionResult> {
   const providerStop = createProviderStoppedBoundary(ctx.onProviderStopped);
   const { runId, agent, runtime, config, context, onLog, onMeta, onSpawn, authToken } = ctx;
   const executionTarget = readAdapterExecutionTarget({
@@ -767,6 +799,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
         const parsed = consumeAccounting(stdout);
         return { usage: parsed.usage, costUsd: parsed.usage.costUsd, usageBasis: "per_run", provider, biller: resolvePiBiller(runtimeEnv, provider), billingType: "unknown", model, complete: parsed.sawAgentEnd };
       });
+      dispatch.providerDispatchStarted = true;
       const proc = await runAdapterExecutionTargetProcess(runId, runtimeExecutionTarget, command, args, {
         onProcessStopped: providerStop.beginInvocation(),
         cwd,
