@@ -11366,31 +11366,16 @@ export function issueRoutes(
       if (attachmentWorkProductId && !createInput.externalId) {
         createInput.externalId = attachmentWorkProductId;
       }
-      const existingAttachmentProduct =
-        attachmentWorkProductId
-          ? await db
-              .select({ id: issueWorkProducts.id })
-              .from(issueWorkProducts)
-              .where(
-                and(
-                  eq(issueWorkProducts.companyId, issue.companyId),
-                  eq(issueWorkProducts.issueId, issue.id),
-                  eq(issueWorkProducts.type, "artifact"),
-                  eq(issueWorkProducts.provider, "paperclip"),
-                  eq(issueWorkProducts.externalId, attachmentWorkProductId),
-                  createdByRunId
-                    ? eq(issueWorkProducts.createdByRunId, createdByRunId)
-                    : isNull(issueWorkProducts.createdByRunId),
-                ),
-              )
-              .limit(1)
-              .then((rows) => rows[0] ?? null)
-          : null;
-      const product = existingAttachmentProduct
-        ? await workProductsSvc.update(
-            existingAttachmentProduct.id,
-            createInput,
-          )
+      const existingAttachmentProductId = attachmentWorkProductId
+        ? await workProductsSvc.findArtifactForAttachment({
+            companyId: issue.companyId,
+            issueId: issue.id,
+            attachmentId: attachmentWorkProductId,
+            createdByRunId,
+          })
+        : null;
+      const product = existingAttachmentProductId
+        ? await workProductsSvc.update(existingAttachmentProductId, createInput)
         : await workProductsSvc.createForIssue(
             issue.id,
             issue.companyId,
