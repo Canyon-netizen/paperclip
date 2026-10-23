@@ -1,23 +1,8 @@
-/**
- * Regression test for the hermes-local adapter's skill reconciliation.
- *
- * When the Paperclip-managed skills cannot be reconciled, the adapter fails
- * before it reaches the provider: no model call happened, so there is nothing
- * to account for. Throwing at that point leaves the run unsettled, and the
- * budget gate then blocks the agent from ever running again - one failed
- * bootstrap wedges the agent permanently.
- *
- * The adapter therefore reports the failure with the "no provider work" proof
- * the server already understands, so the run can be settled.
- */
-
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 
-// The provider is never reached in this test, but the adapter must not spawn it
-// either; mocking keeps the test hermetic.
 vi.mock("@paperclipai/adapter-utils/server-utils", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@paperclipai/adapter-utils/server-utils")>();
   return {
@@ -80,8 +65,6 @@ describe("hermes-local adapter: the skills cannot be reconciled", () => {
       const source = path.join(home, "materialised", "demo");
       await fs.mkdir(source, { recursive: true });
       await fs.writeFile(path.join(source, "SKILL.md"), "---\nname: demo\n---\n", "utf8");
-      // The runtime name is taken by a real directory, so the reconciliation
-      // cannot replace it and fails.
       await fs.mkdir(path.join(home, "skills", "demo--1234"), { recursive: true });
 
       const logs: string[] = [];
@@ -105,9 +88,6 @@ describe("hermes-local adapter: the skills cannot be reconciled", () => {
       expect(result.exitCode).toBe(1);
       expect(result.errorMessage).toContain("Hermes cannot start");
       expect(logs.join("\n")).toContain("Cannot start without the required Paperclip-managed skills");
-      // The proof the server settles the run on says the provider was never
-      // reached. Assert it here too: a mock that silently succeeds would let a
-      // future change start Hermes before the reconciliation and still pass.
       expect(runChildProcess).not.toHaveBeenCalled();
     } finally {
       await fs.rm(home, { recursive: true, force: true });
