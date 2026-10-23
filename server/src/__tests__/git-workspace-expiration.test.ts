@@ -229,6 +229,61 @@ describeEmbeddedPostgres("reconstructable Git expiration", () => {
       vi.unstubAllEnvs();
     });
 
+    it("expires and restores a nested checkout that only has an unpushed commit", async () => {
+      vi.stubEnv("PAPERCLIP_SECRETS_MASTER_KEY", "31".repeat(32));
+      const f = await nestedFixture(false);
+      await fs.writeFile(path.join(f.nested.cwd, "nested.txt"), "nested B (unpushed)\n");
+      git(f.nested.cwd, "commit", "-am", "Nested B unpushed");
+      const unpushed = git(f.nested.cwd, "rev-parse", "HEAD");
+      expect(await exists(path.join(f.nested.cwd, ".git", "COMMIT_EDITMSG"))).toBe(true);
+      expect(await f.expire({ expireBase: false })).toMatchObject({ expired: false, skipReason: "unpushed_managed_checkout" });
+      expect(await f.expire({ expireBase: false, restorePoint: restorePoint() })).toMatchObject({ expired: true, restorePoint: true, skipReason: null });
+      expect(await f.reopen()).toMatchObject({ ok: true, reopened: true });
+      expect(git(f.nested.cwd, "rev-parse", "HEAD")).toBe(unpushed);
+      vi.unstubAllEnvs();
+    });
+
+    it("keeps a workspace whose nested checkout holds unpushed history only in another branch's reflog", async () => {
+      vi.stubEnv("PAPERCLIP_SECRETS_MASTER_KEY", "31".repeat(32));
+      const f = await nestedFixture(false);
+      const tree = git(f.nested.cwd, "rev-parse", "HEAD^{tree}");
+      const orphan = execFileSync("git", ["commit-tree", tree, "-p", "HEAD", "-m", "Only in a reflog"],
+        { cwd: f.nested.cwd, env: gitEnv, encoding: "utf8" }).trim();
+      git(f.nested.cwd, "update-ref", "--create-reflog", "refs/heads/side", orphan);
+      git(f.nested.cwd, "update-ref", "refs/heads/side", f.nestedA);
+      await fs.writeFile(path.join(f.nested.cwd, "draft.md"), "untracked\n");
+      expect(await f.expire({ expireBase: false, restorePoint: restorePoint() }))
+        .toMatchObject({ expired: false, skipReason: "unpushed_managed_checkout_branches" });
+      expect(await exists(f.cwd)).toBe(true);
+      vi.unstubAllEnvs();
+    });
+
+    it("rolls back when new history appears after capture without changing files", async () => {
+      vi.stubEnv("PAPERCLIP_SECRETS_MASTER_KEY", "31".repeat(32));
+      const f = await nestedFixture(false);
+      await unpushedNestedWork(f.nested.cwd);
+      const result = await f.expire({ expireBase: false, restorePoint: restorePoint(), beforeDelete: async () => {
+        git(f.nested.cwd, "commit", "--allow-empty", "-q", "-m", "Made after capture");
+        git(f.nested.cwd, "reset", "-q", "--soft", "HEAD~1");
+      } });
+      expect(result).toMatchObject({ expired: false, skipReason: "restore_point_contents_changed" });
+      expect(await exists(f.cwd)).toBe(true);
+      vi.unstubAllEnvs();
+    });
+
+    it("rolls back when the main worktree gains history after capture without changing files", async () => {
+      vi.stubEnv("PAPERCLIP_SECRETS_MASTER_KEY", "31".repeat(32));
+      const f = await nestedFixture(false);
+      await fs.writeFile(path.join(f.cwd, "draft.md"), "untracked main work\n");
+      const result = await f.expire({ expireBase: false, restorePoint: restorePoint(), beforeDelete: async () => {
+        git(f.cwd, "commit", "--allow-empty", "-q", "-m", "Made after capture");
+        git(f.cwd, "reset", "-q", "--soft", "HEAD~1");
+      } });
+      expect(result).toMatchObject({ expired: false, skipReason: "restore_point_contents_changed" });
+      expect(await exists(f.cwd)).toBe(true);
+      vi.unstubAllEnvs();
+    });
+
     it("keeps a workspace whose nested checkout has unpushed work on another branch", async () => {
       vi.stubEnv("PAPERCLIP_SECRETS_MASTER_KEY", "31".repeat(32));
       const f = await nestedFixture(false);

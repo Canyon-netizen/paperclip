@@ -9,7 +9,7 @@ import { executionWorkspaces, issues, heartbeatRuns, nativeRunFinalizations, env
 import { createGitRemoteAuthProvider } from "./git-credentials.js";
 import type { StorageService } from "../storage/types.js";
 import { currentRestorePointSnapshot, RestorePointSkip, type RestorePointLimits } from "./git-restore-point.js";
-import { abandonGitRestorePoint, abandonGitRestorePointsByKey, activateGitRestorePoints, restorePointSnapshotMatches, storeGitRestorePoint } from "./git-restore-point-storage.js";
+import { abandonGitRestorePoint, abandonGitRestorePointsByKey, activateGitRestorePoints, restorePointHistoryUnchanged, restorePointSnapshotMatches, storeGitRestorePoint } from "./git-restore-point-storage.js";
 import { withIsolatedRepositorySourceLock, verifiedRecordedIsolatedRemoteSource } from "./isolated-remote-workspace-source.js";
 import { managedProjectCheckoutName } from "./managed-project-checkout-name.js";
 import type { GitRemoteAuthProvider } from "./git-credentials.js";
@@ -316,13 +316,21 @@ export async function expireReconstructableGitWorkspace(db: Db, snapshot: Worksp
               checkouts.clear();
               const savedCheckoutRestorePoints = new Map((recipe.contents?.checkouts ?? []).filter(checkout => checkout.restorePoint)
                 .map(checkout => [checkout.name, checkout.restorePoint!]));
+              const relaxedChecks = new Map<string, CheckoutRestorePointNeed>();
+              const relaxedProver = managedCheckoutProver(db, workspace, auth, checkouts, relaxedChecks);
               await assertReproducibleGitFiles(recipe.worktreePath, options.signal, { preserveSettings: true,
-                proveManagedCheckout: savedCheckoutRestorePoints.size > 0
-                  ? managedCheckoutProver(db, workspace, auth, checkouts, new Map()) : proveManagedCheckout,
+                proveManagedCheckout: async (checkoutPath, name, signal) => {
+                  if (!savedCheckoutRestorePoints.has(name)) return proveManagedCheckout(checkoutPath, name, signal);
+                  await relaxedProver(checkoutPath, name, signal);
+                  if (!await restorePointHistoryUnchanged(savedCheckoutRestorePoints.get(name)!, checkoutPath, signal)) {
+                    throw new Error("restore_point_contents_changed");
+                  }
+                },
                 restorePoint: Boolean(recipe.restorePoint),
                 verifyFetchedCommit: (commit, signal) => verifyRemoteGitCommit(recipe.repoUrl, commit, auth, signal) });
-              if (recipe.restorePoint && !restorePointSnapshotMatches(recipe.restorePoint,
-                await currentRestorePointSnapshot(recipe.worktreePath, options.signal))) throw new Error("restore_point_contents_changed");
+              if (recipe.restorePoint && (!restorePointSnapshotMatches(recipe.restorePoint,
+                await currentRestorePointSnapshot(recipe.worktreePath, options.signal))
+                || !await restorePointHistoryUnchanged(recipe.restorePoint, recipe.worktreePath, options.signal))) throw new Error("restore_point_contents_changed");
               for (const checkout of checkouts.values()) {
                 const cwd = path.join(recipe.worktreePath, ".paperclip-repositories", checkout.name);
                 locks.push(await acquireGitExpirationLocks(lockLocations.filter(location => location.checkout === checkout.name), state.lockToken));
