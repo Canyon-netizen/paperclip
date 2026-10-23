@@ -4042,11 +4042,6 @@ describe("wake continuation comment ownership", () => {
 });
 
 describe("ensurePaperclipSkillSymlink", () => {
-  // A managed skill is materialised per version under
-  // <root>/__versions__/<skillId>/<versionId>, and the runtime links it into
-  // the adapter's skills home under a name that is stable per skill key. When
-  // the pin moves, the link still points at the previous version - and the
-  // reconciliation then refuses to replace it and fails the whole run.
   async function makeSkillTree(root: string, skillId: string, versions: string[]) {
     const dirs: string[] = [];
     for (const version of versions) {
