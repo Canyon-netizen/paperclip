@@ -213,10 +213,34 @@ const PAPERCLIP_CLAUDE_SETTINGS_FILE = ".claude/settings.local.json";
 
 export type ManagedCheckoutProver = (checkoutPath: string, name: string, signal?: AbortSignal) => Promise<void>;
 
-async function assertCommitMessageSaved(cwd: string, gitDir: string, signal?: AbortSignal) {
-  const message = await fs.readFile(path.join(gitDir, "COMMIT_EDITMSG"), "utf8").catch((error: NodeJS.ErrnoException) => {
-    if (error.code === "ENOENT") return null; throw error;
+const COMMIT_MESSAGE_LIMIT = 64 * 1024;
+
+async function readCommitMessage(gitDir: string): Promise<string | null> {
+  const target = path.join(gitDir, "COMMIT_EDITMSG");
+  const entry = await fs.lstat(target).catch((error: NodeJS.ErrnoException) => {
+    if (error.code === "ENOENT") return null;
+    throw error;
   });
+  if (!entry) return null;
+  if (!entry.isFile() || entry.size > COMMIT_MESSAGE_LIMIT) throw new Error("unsupported_commit_message");
+  const handle = await fs.open(target, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+  try {
+    const stat = await handle.stat();
+    if (!stat.isFile() || stat.size > COMMIT_MESSAGE_LIMIT) throw new Error("unsupported_commit_message");
+    const buffer = Buffer.alloc(COMMIT_MESSAGE_LIMIT + 1);
+    let length = 0;
+    while (length < buffer.length) {
+      const { bytesRead } = await handle.read(buffer, length, buffer.length - length, length);
+      if (bytesRead === 0) break;
+      length += bytesRead;
+    }
+    if (length > COMMIT_MESSAGE_LIMIT) throw new Error("unsupported_commit_message");
+    return buffer.subarray(0, length).toString("utf8");
+  } finally { await handle.close(); }
+}
+
+async function assertCommitMessageSaved(cwd: string, gitDir: string, signal?: AbortSignal) {
+  const message = await readCommitMessage(gitDir);
   if (message === null) return;
   const saved = [(await gitCacheCommand(cwd, ["log", "-1", "--format=%B"], signal)).trim(),
     ...(await gitCacheCommand(cwd, ["log", "-g", "--format=%B%x00", "HEAD"], signal).catch(() => "")).split("\0").map(entry => entry.trim())];
@@ -406,9 +430,7 @@ export async function assertReproducibleGitFiles(cwd: string, signal?: AbortSign
       }
     }
     await assertEmptyRefs(path.join(gitDir, "refs"));
-    const message = await fs.readFile(path.join(gitDir, "COMMIT_EDITMSG"), "utf8").catch((error: NodeJS.ErrnoException) => {
-      if (error.code === "ENOENT") return null; throw error;
-    });
+    const message = await readCommitMessage(gitDir);
     if (message !== null && message.trim() !== (await gitCacheCommand(cwd, ["log", "-1", "--format=%B"], signal)).trim()) {
       const saved = options.restorePoint
         ? (await gitCacheCommand(cwd, ["log", "-g", "--format=%B%x00", "HEAD"], signal).catch(() => "")).split("\0").map(entry => entry.trim())

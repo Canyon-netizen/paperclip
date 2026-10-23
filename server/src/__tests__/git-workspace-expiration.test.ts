@@ -284,6 +284,23 @@ describeEmbeddedPostgres("reconstructable Git expiration", () => {
       vi.unstubAllEnvs();
     });
 
+    it.each([
+      ["a named pipe", async (file: string) => { execFileSync("mkfifo", [file]); }],
+      ["an oversized file", async (file: string) => { await fs.writeFile(file, "x".repeat(65 * 1024)); }],
+      ["a symlink", async (file: string) => { await fs.symlink("/dev/zero", file); }],
+    ])("keeps a workspace whose nested COMMIT_EDITMSG is %s without reading it unsafely", async (_name, plant) => {
+      vi.stubEnv("PAPERCLIP_SECRETS_MASTER_KEY", "31".repeat(32));
+      const f = await nestedFixture(false);
+      await unpushedNestedWork(f.nested.cwd);
+      const file = path.join(f.nested.cwd, ".git", "COMMIT_EDITMSG");
+      await fs.rm(file, { force: true });
+      await plant(file);
+      expect(await f.expire({ expireBase: false, restorePoint: restorePoint() }))
+        .toMatchObject({ expired: false, skipReason: "unsupported_commit_message" });
+      expect(await exists(f.cwd)).toBe(true);
+      vi.unstubAllEnvs();
+    });
+
     it("keeps a workspace whose nested checkout has unpushed work on another branch", async () => {
       vi.stubEnv("PAPERCLIP_SECRETS_MASTER_KEY", "31".repeat(32));
       const f = await nestedFixture(false);
