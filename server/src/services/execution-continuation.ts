@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { and, asc, desc, eq, inArray, isNotNull, isNull, or, sql } from "drizzle-orm";
 import { z } from "zod";
+import { encodePaperclipWakeData } from "@paperclipai/adapter-utils/server-utils";
 import {
   agentWakeupRequests,
   heartbeatRuns,
@@ -21,8 +22,25 @@ import { githubRecoveryReceipts } from "./chat-channels/github/recovery-receipts
 const EXECUTION_CONTINUATION_LIMITS = {
   maxComments: 40,
   maxCommentBodyChars: 4_000,
-  maxCommentBodyTotalChars: 24_000,
+  maxCommentBodyEncodedBytes: 24_000,
+  maxObjectiveEncodedBytes: 16_000,
+  maxCompletedWorkEncodedBytes: 32_768,
 } as const;
+
+const encodedContinuationTextBytes = (value: string): number =>
+  Buffer.byteLength(encodePaperclipWakeData(value).slice(1, -1));
+
+const truncateToContinuationTextBytes = (value: string, budget: number): string => {
+  if (encodedContinuationTextBytes(value) <= budget) return value;
+  let low = 0;
+  let high = value.length;
+  while (low < high) {
+    const middle = Math.ceil((low + high) / 2);
+    if (encodedContinuationTextBytes(value.slice(0, middle)) <= budget) low = middle;
+    else high = middle - 1;
+  }
+  return value.slice(0, low);
+};
 
 export class StaleExecutionContinuationError extends Error {
   constructor(readonly code: "continuation_task_ownership_changed") {
@@ -230,7 +248,7 @@ export async function buildExecutionContinuation(input: {
       ))
     : [];
   const inheritedForeignIds = new Set(inheritedForeignComments.map(row => row.id));
-  const originCommentIds = [
+  const candidateOriginCommentIds = [
     ...new Set([
       ...continuationOriginCommentIds(input.context),
       ...continuationOriginCommentIds(sourceRun?.context),
@@ -241,6 +259,49 @@ export async function buildExecutionContinuation(input: {
     ]),
   ];
   const explicitContinuationCommentId = string(explicitContinuation.commentId);
+  const candidateRequiredCommentIds = [
+    ...new Set([
+      ...candidateOriginCommentIds,
+      ...(explicitContinuationCommentId ? [explicitContinuationCommentId] : []),
+    ]),
+  ];
+  const candidateRows = candidateRequiredCommentIds.length
+    ? await db
+        .select({ id: issueComments.id, createdAt: issueComments.createdAt })
+        .from(issueComments)
+        .where(
+          and(
+            eq(issueComments.companyId, companyId),
+            eq(issueComments.issueId, issueId),
+            inArray(issueComments.id, candidateRequiredCommentIds),
+          ),
+        )
+    : [];
+  const candidateCreatedAt = new Map(
+    candidateRows.map((row) => [row.id, row.createdAt]),
+  );
+  if (candidateOriginCommentIds.some((id) => !candidateCreatedAt.has(id)))
+    throw new Error("continuation_source_context_missing");
+  const originCapacity = Math.max(
+    1,
+    EXECUTION_CONTINUATION_LIMITS.maxComments -
+      (explicitContinuationCommentId ? 1 : 0),
+  );
+  const originCommentIds = candidateOriginCommentIds
+    .filter((id) => candidateCreatedAt.has(id))
+    .sort((left, right) => {
+      const createdAtDiff =
+        candidateCreatedAt.get(right)!.getTime() -
+        candidateCreatedAt.get(left)!.getTime();
+      if (createdAtDiff !== 0) return createdAtDiff;
+      return left < right ? 1 : left > right ? -1 : 0;
+    })
+    .slice(0, originCapacity)
+    .sort(
+      (left, right) =>
+        candidateOriginCommentIds.indexOf(left) -
+        candidateOriginCommentIds.indexOf(right),
+    );
   const requiredCommentIds = [
     ...new Set([
       ...originCommentIds,
@@ -303,23 +364,27 @@ export async function buildExecutionContinuation(input: {
     requiredCommentIds.filter((id) => rows.some((row) => row.id === id)),
   );
   const bodyAllowances = new Map<string, number>();
-  let remainingBodyChars = EXECUTION_CONTINUATION_LIMITS.maxCommentBodyTotalChars;
-  const allocateBodyChars = (entries: typeof preparedRows) => {
+  let remainingBodyBytes: number =
+    EXECUTION_CONTINUATION_LIMITS.maxCommentBodyEncodedBytes;
+  const allocateBodyBytes = (entries: typeof preparedRows) => {
     for (const { row, safe } of entries) {
-      const bodyLength = row.deletedAt ? 0 : safe.body.length;
+      const body = row.deletedAt ? "" : safe.body;
       const allowed = Math.min(
         EXECUTION_CONTINUATION_LIMITS.maxCommentBodyChars,
-        remainingBodyChars,
-        bodyLength,
+        body.length,
+        truncateToContinuationTextBytes(body, remainingBodyBytes).length,
       );
       bodyAllowances.set(row.id, allowed);
-      remainingBodyChars -= allowed;
+      remainingBodyBytes = Math.max(
+        0,
+        remainingBodyBytes - encodedContinuationTextBytes(body.slice(0, allowed)),
+      );
     }
   };
-  allocateBodyChars(
+  allocateBodyBytes(
     preparedRows.filter(({ row }) => requiredRowIds.has(row.id)).reverse(),
   );
-  allocateBodyChars(
+  allocateBodyBytes(
     preparedRows.filter(({ row }) => !requiredRowIds.has(row.id)).reverse(),
   );
   const messages = preparedRows.map(({ row, safe }) => ({
@@ -377,16 +442,49 @@ export async function buildExecutionContinuation(input: {
           ),
         }
       : undefined;
-  const latestRequest = messages.findLast(
-    (row) =>
-      row.authorType === "user" && !row.createdByRunId && !row.deleted && row.body.trim().length > 0,
-  );
+  const [latestRequestRow] = await db
+    .select()
+    .from(issueComments)
+    .where(
+      and(
+        eq(issueComments.companyId, companyId),
+        eq(issueComments.issueId, issueId),
+        eq(issueComments.authorType, "user"),
+        isNull(issueComments.createdByRunId),
+        isNull(issueComments.deletedAt),
+        sql`length(trim(${issueComments.body})) > 0`,
+      ),
+    )
+    .orderBy(desc(issueComments.createdAt), desc(issueComments.id))
+    .limit(1);
+  const latestRequest = latestRequestRow
+    ? input.exposeLowTrustRaw
+      ? latestRequestRow
+      : sanitizeQuarantinedCommentForHigherTrust(latestRequestRow)
+    : null;
   const hashObjectiveSource = (value: string) => createHash("sha256").update(value.trim()).digest("hex");
   const objectiveSource = latestRequest
-    ? { kind: "comment" as const, id: latestRequest.id, revision: latestRequest.updatedAt }
+    ? { kind: "comment" as const, id: latestRequest.id, revision: latestRequest.updatedAt.toISOString() }
     : issue.description !== null && issue.description !== undefined
       ? { kind: "description" as const, id: issue.id, revision: hashObjectiveSource(issue.description) }
       : { kind: "title" as const, id: issue.id, revision: hashObjectiveSource(issue.title) };
+  const objective = latestRequest
+    ? truncateToContinuationTextBytes(
+        latestRequest.body,
+        EXECUTION_CONTINUATION_LIMITS.maxObjectiveEncodedBytes,
+      )
+    : issue.description ?? issue.title;
+  const completedWorkSummary =
+    input.summary ??
+    string(object(object(sourceRun?.result).nativeResult).summary) ??
+    string(object(sourceRun?.result).summary) ??
+    null;
+  const completedWorkText = completedWorkSummary === null
+    ? null
+    : truncateToContinuationTextBytes(
+        completedWorkSummary,
+        EXECUTION_CONTINUATION_LIMITS.maxCompletedWorkEncodedBytes,
+      );
   const priorRuns = await db
     .select({ id: heartbeatRuns.id, result: heartbeatRuns.resultJson, status: heartbeatRuns.status, errorCode: heartbeatRuns.errorCode, runtimeMode: heartbeatRuns.runtimeMode, retryOfRunId: heartbeatRuns.retryOfRunId })
     .from(heartbeatRuns)
@@ -525,7 +623,7 @@ export async function buildExecutionContinuation(input: {
       sourceRunId,
     },
     originCommentIds,
-    objective: latestRequest?.body ?? issue.description ?? issue.title,
+    objective,
     objectiveSource,
     messages,
     humanResponses: interactions.flatMap(row => {
@@ -543,9 +641,7 @@ export async function buildExecutionContinuation(input: {
     // Low-trust evidence only: renderPaperclipWakePrompt removes completedWork
     // from requestContext and encodes it in the fenced, non-authoritative
     // continuation-evidence section. It cannot supply objective or authority.
-    completedWork: input.summary ??
-      string(object(object(sourceRun?.result).nativeResult).summary)?.slice(0, 32_000) ??
-      string(object(sourceRun?.result).summary)?.slice(0, 32_000) ?? null,
+    completedWork: completedWorkText,
     completedActions,
     unresolvedInteractionIds: interactions
       .filter((row) => row.status === "pending")
