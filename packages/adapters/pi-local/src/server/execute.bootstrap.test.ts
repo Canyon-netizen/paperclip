@@ -188,7 +188,15 @@ describe("pi pre-provider failure accounting", () => {
           remoteCwd: "/remote/workspace",
           timeoutMs: 60_000,
           runner: {
-            execute: async () => ({ exitCode: 0, stdout: "", stderr: "" }),
+            execute: async () => ({
+              exitCode: 0,
+              signal: null,
+              timedOut: false,
+              stdout: "",
+              stderr: "",
+              pid: null,
+              startedAt: null,
+            }),
           },
         },
       }),
