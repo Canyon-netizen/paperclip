@@ -21,6 +21,7 @@ import {
 } from "@paperclipai/adapter-utils/execution-target";
 import { discoverPiModelsCached } from "./models.js";
 import { parsePiJsonl } from "./parse.js";
+import { preparePiRuntimeConfig } from "./runtime-config.js";
 import { SANDBOX_INSTALL_COMMAND } from "../index.js";
 
 function summarizeStatus(checks: AdapterEnvironmentCheck[]): AdapterEnvironmentTestResult["status"] {
@@ -44,6 +45,22 @@ function summarizeProbeDetail(stdout: string, stderr: string, parsedError: strin
   const clean = raw.replace(/\s+/g, " ").trim();
   const max = 240;
   return clean.length > max ? `${clean.slice(0, max - 1)}...` : clean;
+}
+
+async function withPiProviderEnv<T>(
+  runtimeEnv: Record<string, string>,
+  env: Record<string, string>,
+  fn: (runtimeEnv: Record<string, string>) => Promise<T>,
+): Promise<T> {
+  const prepared = await preparePiRuntimeConfig({ env });
+  try {
+    const providerEnv = prepared.agentConfigDir
+      ? { ...runtimeEnv, PI_CODING_AGENT_DIR: prepared.agentConfigDir }
+      : runtimeEnv;
+    return await fn(providerEnv);
+  } finally {
+    await prepared.cleanup();
+  }
 }
 
 function normalizeEnv(input: unknown): Record<string, string> {
@@ -170,7 +187,7 @@ export async function testEnvironment(
   // model/auth issues directly.
   if (!targetIsRemote && canRunProbe) {
     try {
-      const discovered = await discoverPiModelsCached({ command, cwd, env: runtimeEnv });
+      const discovered = await withPiProviderEnv(runtimeEnv, env, (probeEnv) => discoverPiModelsCached({ command, cwd, env: probeEnv }));
       if (discovered.length > 0) {
         checks.push({
           code: "pi_models_discovered",
@@ -211,7 +228,7 @@ export async function testEnvironment(
   } else if (canRunProbe) {
     // Verify model is in the list
     try {
-      const discovered = await discoverPiModelsCached({ command, cwd, env: runtimeEnv });
+      const discovered = await withPiProviderEnv(runtimeEnv, env, (probeEnv) => discoverPiModelsCached({ command, cwd, env: probeEnv }));
       const modelExists = discovered.some((m: { id: string }) => m.id === configuredModel);
       if (modelExists) {
         checks.push({
@@ -260,18 +277,20 @@ export async function testEnvironment(
     if (extraArgs.length > 0) args.push(...extraArgs);
 
     try {
-      const probe = await runAdapterExecutionTargetProcess(
-        runId,
-        target,
-        command,
-        args,
-        {
-          cwd,
-          env: runtimeEnv,
-          timeoutSec: 60,
-          graceSec: 5,
-          onLog: async () => {},
-        },
+      const probe = await withPiProviderEnv(runtimeEnv, env, (probeEnv) =>
+        runAdapterExecutionTargetProcess(
+          runId,
+          target,
+          command,
+          args,
+          {
+            cwd,
+            env: probeEnv,
+            timeoutSec: 60,
+            graceSec: 5,
+            onLog: async () => {},
+          },
+        ),
       );
 
       const parsed = parsePiJsonl(probe.stdout);
