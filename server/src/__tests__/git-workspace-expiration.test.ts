@@ -7,7 +7,8 @@ import { pathToFileURL } from "node:url";
 import { createRequire } from "node:module";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { eq, sql } from "drizzle-orm";
-import { companies, projects, projectWorkspaces, issues, executionWorkspaces, agents, heartbeatRuns, nativeRunFinalizations, workspaceRuntimeServices, createDb } from "@paperclipai/db";
+import { companies, projects, projectWorkspaces, issues, executionWorkspaces, agents, heartbeatRuns, nativeRunFinalizations, workspaceRuntimeServices, executionWorkspaceRestorePoints, createDb } from "@paperclipai/db";
+import { getStorageService } from "../storage/index.js";
 import { getEmbeddedPostgresTestSupport, startEmbeddedPostgresTestDatabase } from "./helpers/embedded-postgres.js";
 import { resolveManagedProjectWorkspaceDir } from "../home-paths.js";
 import { materializeManagedProjectWorkspace } from "../services/managed-repository-checkout.js";
@@ -195,6 +196,68 @@ describeEmbeddedPostgres("reconstructable Git expiration", () => {
     await fs.writeFile(path.join(f.nested.cwd, "continued.txt"), "continued after base restoration\n");
     git(f.nested.cwd, "add", "."); git(f.nested.cwd, "commit", "-m", "Continued after base restoration");
     expect(git(f.nested.cwd, "rev-parse", "HEAD")).not.toBe(f.nestedA);
+  });
+
+  describe("restore points for nested checkouts", () => {
+    const restorePoint = () => ({ storage: getStorageService(), notBefore: new Date(Date.now() - 24 * 3_600_000), keyDurable: true });
+    const ledger = (workspaceId: string) => db.select().from(executionWorkspaceRestorePoints)
+      .where(eq(executionWorkspaceRestorePoints.executionWorkspaceId, workspaceId));
+    async function unpushedNestedWork(nestedCwd: string) {
+      await fs.writeFile(path.join(nestedCwd, "nested.txt"), "nested B (unpushed)\n");
+      git(nestedCwd, "commit", "-am", "Nested B unpushed");
+      const unpushed = git(nestedCwd, "rev-parse", "HEAD");
+      await fs.writeFile(path.join(nestedCwd, "draft.md"), "nested untracked work\n");
+      return unpushed;
+    }
+
+    it("expires a workspace whose nested checkout has unsaved work and restores the checkout exactly", async () => {
+      vi.stubEnv("PAPERCLIP_SECRETS_MASTER_KEY", "31".repeat(32));
+      const f = await nestedFixture(false);
+      const unpushed = await unpushedNestedWork(f.nested.cwd);
+      expect(await f.expire({ expireBase: false })).toMatchObject({ expired: false, skipReason: "dirty_or_untracked_files" });
+      const result = await f.expire({ expireBase: false, restorePoint: restorePoint() });
+      expect(result).toMatchObject({ expired: true, restorePoint: true, skipReason: null });
+      const recipe = (await f.row()).metadata?.gitCacheRestoration as Record<string, any>;
+      expect(recipe.schema).toBe("paperclip.git-cache-restoration.v2");
+      expect(recipe.restorePoint).toBeUndefined();
+      expect(recipe.contents.checkouts[0].restorePoint).toMatchObject({ head: unpushed, headOnRemote: false });
+      expect(await ledger(f.workspaceId)).toMatchObject([{ status: "active", checkoutName: recipe.contents.checkouts[0].name }]);
+      expect(await f.reopen()).toMatchObject({ ok: true, reopened: true });
+      expect(git(f.nested.cwd, "rev-parse", "HEAD")).toBe(unpushed);
+      expect(await fs.readFile(path.join(f.nested.cwd, "draft.md"), "utf8")).toBe("nested untracked work\n");
+      expect(await fs.readFile(f.nestedSettingsPath)).toEqual(f.settings);
+      vi.unstubAllEnvs();
+    });
+
+    it("keeps a workspace whose nested checkout has unpushed work on another branch", async () => {
+      vi.stubEnv("PAPERCLIP_SECRETS_MASTER_KEY", "31".repeat(32));
+      const f = await nestedFixture(false);
+      git(f.nested.cwd, "checkout", "-q", "-b", "side");
+      await fs.writeFile(path.join(f.nested.cwd, "side.txt"), "side branch work\n");
+      git(f.nested.cwd, "add", "side.txt"); git(f.nested.cwd, "commit", "-q", "-m", "Side work");
+      git(f.nested.cwd, "checkout", "-q", "main");
+      await fs.writeFile(path.join(f.nested.cwd, "draft.md"), "untracked\n");
+      expect(await f.expire({ expireBase: false, restorePoint: restorePoint() }))
+        .toMatchObject({ expired: false, skipReason: "unpushed_managed_checkout_branches" });
+      expect(await exists(f.cwd)).toBe(true);
+      expect(await ledger(f.workspaceId)).toEqual([]);
+      vi.unstubAllEnvs();
+    });
+
+    it("keeps the workspace and drops every restore point when a nested checkout changes after capture", async () => {
+      vi.stubEnv("PAPERCLIP_SECRETS_MASTER_KEY", "31".repeat(32));
+      const f = await nestedFixture(false);
+      await unpushedNestedWork(f.nested.cwd);
+      const result = await f.expire({ expireBase: false, restorePoint: restorePoint(),
+        beforeDelete: async () => { await fs.writeFile(path.join(f.nested.cwd, "draft.md"), "changed after capture\n"); } });
+      expect(result).toMatchObject({ expired: false, skipReason: "restore_point_contents_changed" });
+      expect(await fs.readFile(path.join(f.nested.cwd, "draft.md"), "utf8")).toBe("changed after capture\n");
+      const recipe = (await f.row()).metadata?.gitCacheRestoration as Record<string, any>;
+      expect(recipe.schema).toBe("paperclip.git-cache-restoration.v1");
+      expect(recipe.contents.checkouts[0].restorePoint).toBeUndefined();
+      expect(await ledger(f.workspaceId)).toMatchObject([{ status: "superseded" }]);
+      vi.unstubAllEnvs();
+    });
   });
 
   it("retains custom base ignore patterns after expiring the nested workspace", async () => {
