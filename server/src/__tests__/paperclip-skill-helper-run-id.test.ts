@@ -162,7 +162,7 @@ describe("paperclip skill helpers and the run id header", () => {
       PAPERCLIP_TASK_ID: issueId,
       PAPERCLIP_HELPER_STATE_DIR: stateDir,
     };
-    if (runId) env.PAPERCLIP_RUN_ID = runId;
+    if (runId !== undefined) env.PAPERCLIP_RUN_ID = runId;
     else delete env.PAPERCLIP_RUN_ID;
     return env;
   }
@@ -201,33 +201,41 @@ describe("paperclip skill helpers and the run id header", () => {
     return JSON.parse(request.body) as Record<string, unknown>;
   }
 
-  it("uploads without a run id header when PAPERCLIP_RUN_ID is unset", async () => {
-    const artifact = await createArtifact();
-    const { baseUrl, requests } = await startApi({
-      uploadedAttachment: attachmentPayload({ sha256: artifact.sha256 }),
-    });
+  const noRunIdCases: Array<[string, string | undefined]> = [
+    ["unset", undefined],
+    ["empty", ""],
+  ];
 
-    const result = await runHelper(
-      uploadHelperPath,
-      [artifact.file, "--title", "Artifact", "--chat-comment", "Here it is", "--output", "json"],
-      buildEnv(baseUrl, artifact.stateDir),
-    );
+  it.each(noRunIdCases)(
+    "uploads without a run id header when PAPERCLIP_RUN_ID is %s",
+    async (_label, runId) => {
+      const artifact = await createArtifact();
+      const { baseUrl, requests } = await startApi({
+        uploadedAttachment: attachmentPayload({ sha256: artifact.sha256 }),
+      });
 
-    expect(result.code, result.stderr).toBe(0);
-    expect(requests.length).toBeGreaterThan(0);
-    for (const request of requests) {
-      expect(request.runId).toBeUndefined();
-    }
-    expect(workProductBody(requests).createdByRunId).toBeNull();
-    const receipt = JSON.parse(result.stdout) as {
-      attachment: { id: string };
-      workProduct: { id: string };
-      chatComment: { id: string };
-    };
-    expect(receipt.attachment.id).toBe("attachment-1");
-    expect(receipt.workProduct.id).toBe("work-product-1");
-    expect(receipt.chatComment.id).toBe("comment-1");
-  });
+      const result = await runHelper(
+        uploadHelperPath,
+        [artifact.file, "--title", "Artifact", "--chat-comment", "Here it is", "--output", "json"],
+        buildEnv(baseUrl, artifact.stateDir, runId),
+      );
+
+      expect(result.code, result.stderr).toBe(0);
+      expect(requests.length).toBeGreaterThan(0);
+      for (const request of requests) {
+        expect(request.runId).toBeUndefined();
+      }
+      expect(workProductBody(requests).createdByRunId).toBeNull();
+      const receipt = JSON.parse(result.stdout) as {
+        attachment: { id: string };
+        workProduct: { id: string };
+        chatComment: { id: string };
+      };
+      expect(receipt.attachment.id).toBe("attachment-1");
+      expect(receipt.workProduct.id).toBe("work-product-1");
+      expect(receipt.chatComment.id).toBe("comment-1");
+    },
+  );
 
   it("sends the run id header on every request when PAPERCLIP_RUN_ID is set", async () => {
     const artifact = await createArtifact();
@@ -274,22 +282,25 @@ describe("paperclip skill helpers and the run id header", () => {
     expect(receipt.attachment.id).toBe("attachment-existing");
   });
 
-  it("updates an issue without a run id header when PAPERCLIP_RUN_ID is unset", async () => {
-    const artifact = await createArtifact();
-    const { baseUrl, requests } = await startApi();
+  it.each(noRunIdCases)(
+    "updates an issue without a run id header when PAPERCLIP_RUN_ID is %s",
+    async (_label, runId) => {
+      const artifact = await createArtifact();
+      const { baseUrl, requests } = await startApi();
 
-    const result = await runHelper(
-      issueUpdateHelperPath,
-      ["--issue-id", issueId, "--status", "done", "--comment", "closing note"],
-      buildEnv(baseUrl, artifact.stateDir),
-    );
+      const result = await runHelper(
+        issueUpdateHelperPath,
+        ["--issue-id", issueId, "--status", "done", "--comment", "closing note"],
+        buildEnv(baseUrl, artifact.stateDir, runId),
+      );
 
-    expect(result.code, result.stderr).toBe(0);
-    expect(requests).toHaveLength(1);
-    expect(requests[0]?.method).toBe("PATCH");
-    expect(requests[0]?.url).toBe(`/api/issues/${issueId}`);
-    expect(requests[0]?.runId).toBeUndefined();
-  });
+      expect(result.code, result.stderr).toBe(0);
+      expect(requests).toHaveLength(1);
+      expect(requests[0]?.method).toBe("PATCH");
+      expect(requests[0]?.url).toBe(`/api/issues/${issueId}`);
+      expect(requests[0]?.runId).toBeUndefined();
+    },
+  );
 
   it("sends the run id header on an issue update when PAPERCLIP_RUN_ID is set", async () => {
     const artifact = await createArtifact();
