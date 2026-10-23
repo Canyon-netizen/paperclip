@@ -284,6 +284,7 @@ export async function testEnvironment(
       graceSec: 5,
       minimumVersion: minimumCliVersion,
     });
+    if (prepared.check) checks.push(prepared.check);
     command = prepared.command;
     const detectedCliVersion = prepared.version;
     if (

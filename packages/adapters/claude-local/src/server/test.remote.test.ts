@@ -163,6 +163,25 @@ describe("claude CLI model compatibility check", () => {
     expect((hello as unknown as [string, unknown, string])[2]).toBe(command);
   });
 
+  it("includes a safe runtime preparation failure in the environment checks", async () => {
+    const response = { signal: null, timedOut: false, pid: 123, startedAt: new Date().toISOString(), stderr: "" };
+    runAdapterExecutionTargetProcess
+      .mockResolvedValueOnce({ ...response, exitCode: 0, stdout: "2.1.263 (Claude Code)\n" })
+      .mockResolvedValueOnce({ ...response, exitCode: 1, stdout: "" });
+    maybeRunSandboxInstallCommand.mockResolvedValueOnce(null).mockResolvedValueOnce({
+      code: "claude_install_command_run", level: "warn", message: "Install command exited 1: npm install",
+      detail: "npm error code ENOTFOUND https://registry-secret@example.test/private",
+    });
+    const result = await testEnvironment({ companyId: "company-1", adapterType: "claude_local",
+      config: { engine: "cli", model: "claude-opus-5-5" }, executionTarget: sandboxTarget });
+    expect(result.status).toBe("fail");
+    expect(result.checks).toContainEqual(expect.objectContaining({ code: "claude_runtime_preparation_failed",
+      detail: "The package installation could not reach the registry." }));
+    expect(result.checks).toContainEqual(expect.objectContaining({ code: "claude_cli_version_incompatible" }));
+    expect(JSON.stringify(result)).not.toContain("registry-secret");
+    expect(runAdapterExecutionTargetProcess).toHaveBeenCalledTimes(2);
+  });
+
   it.each([
     ["claude-fable-5-1", "2.1.251", "2.1.247"],
     ["claude-opus-5-5", "2.1.280", "2.1.279"],

@@ -26,6 +26,7 @@ async function fixture(version: string, installer = "success") {
     'printf "%s\\n" "$*" > "$INSTALL_RECEIPT"',
     'test "$INSTALLER_RESULT" != fail || exit 1',
     'test "$INSTALLER_RESULT" != unchanged || exit 0',
+    'if test "$INSTALLER_RESULT" != success; then printf "%s\\n" "$INSTALLER_RESULT https://registry-secret@example.test/private" >&2; exit 7; fi',
     'mkdir -p "$4/bin"',
     'cp "$SOURCE_CLAUDE" "$4/bin/claude"',
     'printf "%s\\n" "${5##*@}" > "$4/bin/claude.version"',
@@ -37,6 +38,10 @@ async function fixture(version: string, installer = "success") {
     runner: {
       async execute(input) {
         const startedAt = new Date().toISOString();
+        if (input.args?.some(arg => arg.includes("npm install"))) {
+          if (installer == "timeout") return { stdout: "", stderr: "registry-secret", exitCode: null, signal: "SIGTERM", timedOut: true, pid: null, startedAt };
+          if (installer == "throw") throw new Error("registry-secret");
+        }
         try {
           const result = await runFile(input.command, input.args ?? [], {
             cwd: input.cwd ?? root, env: { ...process.env, ...env, ...input.env }, timeout: input.timeoutMs,
@@ -56,7 +61,7 @@ async function fixture(version: string, installer = "success") {
 describe("managed sandbox Claude CLI compatibility", () => {
   it("updates an existing outdated CLI to the exact required version and verifies it", async () => {
     const { input, receipt } = await fixture("2.1.263");
-    expect(await prepareCompatibleClaudeCommand(input)).toEqual({ version: "2.1.280", command: path.join(input.cwd, ".paperclip-runtime/claude-cli/2.1.280/bin/claude") });
+    expect(await prepareCompatibleClaudeCommand(input)).toMatchObject({ version: "2.1.280", command: path.join(input.cwd, ".paperclip-runtime/claude-cli/2.1.280/bin/claude"), check: { code: "claude_runtime_prepared", level: "info" } });
     expect(await readFile(path.join(input.cwd, "version"), "utf8")).toBe("2.1.263");
     expect((await readFile(receipt, "utf8")).trim()).toBe(`install --global --prefix ${path.join(input.cwd, ".paperclip-runtime/claude-cli/2.1.280")} @anthropic-ai/claude-code@2.1.280`);
   });
@@ -69,8 +74,24 @@ describe("managed sandbox Claude CLI compatibility", () => {
 
   it.each(["fail", "unchanged"])("preserves the failed version gate after an installer result of %s", async installer => {
     const { input, receipt } = await fixture("2.1.263", installer);
-    expect(await prepareCompatibleClaudeCommand(input)).toEqual({ command: "claude", version: "2.1.263" });
+    expect(await prepareCompatibleClaudeCommand(input)).toMatchObject({ command: "claude", version: "2.1.263", check: { code: "claude_runtime_preparation_failed", level: "warn" } });
     expect((await readFile(receipt, "utf8")).trim()).toBe(`install --global --prefix ${path.join(input.cwd, ".paperclip-runtime/claude-cli/2.1.280")} @anthropic-ai/claude-code@2.1.280`);
+  });
+
+  it.each([
+    ["EACCES", "The package installation was denied filesystem access."],
+    ["ENOTFOUND", "The package installation could not reach the registry."],
+    ["ETARGET", "The required package version could not be resolved from the registry."],
+    ["unknown-error", "The package installer exited with code 7."],
+    ["timeout", "The package installation timed out."],
+    ["throw", "The package installer could not complete execution."],
+    ["unchanged", "The prepared runtime did not report its version."],
+  ])("reports safe diagnostics after %s without exposing installer output", async (installer, detail) => {
+    const { input } = await fixture("2.1.263", installer);
+    const result = await prepareCompatibleClaudeCommand(input);
+    expect(result).toMatchObject({ command: "claude", version: "2.1.263", check: { code: "claude_runtime_preparation_failed", detail } });
+    expect(JSON.stringify(result)).not.toContain("registry-secret");
+    expect(JSON.stringify(result)).not.toContain("example.test");
   });
 
   it("does not replace a caller's custom command", async () => {
