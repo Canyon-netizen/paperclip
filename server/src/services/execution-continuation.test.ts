@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { eq } from "drizzle-orm";
+import { eq, inArray } from "drizzle-orm";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import {
   agents,
@@ -16,6 +16,10 @@ import {
   startEmbeddedPostgresTestDatabase,
 } from "../__tests__/helpers/embedded-postgres.js";
 import { StaleExecutionContinuationError, buildExecutionContinuation, currentContinuationOrigins, projectHumanInteractionResponse } from "./execution-continuation.js";
+
+const MAX_CONTINUATION_COMMENTS = 40;
+const MAX_CONTINUATION_COMMENT_BODY_CHARS = 4_000;
+const MAX_CONTINUATION_COMMENT_BODY_TOTAL_CHARS = 24_000;
 
 const expectStaleContinuation = async (
   run: () => Promise<unknown>,
@@ -437,6 +441,57 @@ const support = await getEmbeddedPostgresTestSupport();
           }),
         "continuation_task_ownership_changed",
       );
+    });
+
+    it("bounds the continuation payload when a task accumulated many comments", async () => {
+      const commentIds = Array.from({ length: 300 }, () => randomUUID());
+      const body = "context ".repeat(200);
+      const createdAtBase = Date.UTC(2026, 11, 1, 0, 0, 0);
+      for (let offset = 0; offset < commentIds.length; offset += 100) {
+        await db.insert(issueComments).values(
+          commentIds.slice(offset, offset + 100).map((id, index) => ({
+            id,
+            companyId,
+            issueId,
+            authorType: "user" as const,
+            authorUserId: "local-board",
+            body:
+              offset + index === commentIds.length - 1
+                ? "latest ".repeat(1_500)
+                : `${offset + index} ${body}`,
+            createdAt: new Date(createdAtBase + (offset + index) * 1000),
+          })),
+        );
+      }
+      try {
+        const envelope = await build();
+        const totalBodyChars = envelope.messages.reduce(
+          (sum, message) => sum + message.body.length,
+          0,
+        );
+        expect(envelope.messages.length).toBeLessThanOrEqual(
+          MAX_CONTINUATION_COMMENTS,
+        );
+        expect(totalBodyChars).toBeLessThanOrEqual(
+          MAX_CONTINUATION_COMMENT_BODY_TOTAL_CHARS,
+        );
+        for (const message of envelope.messages) {
+          expect(message.body.length).toBeLessThanOrEqual(
+            MAX_CONTINUATION_COMMENT_BODY_CHARS,
+          );
+        }
+        expect(envelope.messages.at(-1)?.id).toBe(commentIds.at(-1));
+        expect(envelope.messages.map((message) => message.id)).toContain(gmailId);
+        const prompt = renderPaperclipWakePrompt(
+          { executionContinuation: envelope },
+          { resumedSession: false },
+        );
+        expect(Buffer.byteLength(prompt)).toBeLessThan(128 * 1024);
+      } finally {
+        await db
+          .delete(issueComments)
+          .where(inArray(issueComments.id, commentIds));
+      }
     });
   },
 );

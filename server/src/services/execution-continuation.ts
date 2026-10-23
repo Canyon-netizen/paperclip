@@ -18,6 +18,12 @@ import { childReviewOutcomes } from "./native-runtime/child-review-outcomes.js";
 import { isCompletedOnboardingHandoffWake } from "./chat-completion-delivery.js";
 import { githubRecoveryReceipts } from "./chat-channels/github/recovery-receipts.js";
 
+const EXECUTION_CONTINUATION_LIMITS = {
+  maxComments: 40,
+  maxCommentBodyChars: 4_000,
+  maxCommentBodyTotalChars: 24_000,
+} as const;
+
 export class StaleExecutionContinuationError extends Error {
   constructor(readonly code: "continuation_task_ownership_changed") {
     super(code);
@@ -169,16 +175,6 @@ export async function buildExecutionContinuation(input: {
     }))
   )
     throw new StaleExecutionContinuationError("continuation_task_ownership_changed");
-  const rows = await db
-    .select()
-    .from(issueComments)
-    .where(
-      and(
-        eq(issueComments.companyId, companyId),
-        eq(issueComments.issueId, issueId),
-      ),
-    )
-    .orderBy(asc(issueComments.createdAt), asc(issueComments.id));
   const interactions = await db
     .select()
     .from(issueThreadInteractions)
@@ -244,27 +240,103 @@ export async function buildExecutionContinuation(input: {
         : []),
     ]),
   ];
+  const explicitContinuationCommentId = string(explicitContinuation.commentId);
+  const requiredCommentIds = [
+    ...new Set([
+      ...originCommentIds,
+      ...(explicitContinuationCommentId ? [explicitContinuationCommentId] : []),
+    ]),
+  ];
+  const recentRows = await db
+    .select()
+    .from(issueComments)
+    .where(
+      and(
+        eq(issueComments.companyId, companyId),
+        eq(issueComments.issueId, issueId),
+      ),
+    )
+    .orderBy(desc(issueComments.createdAt), desc(issueComments.id))
+    .limit(EXECUTION_CONTINUATION_LIMITS.maxComments);
+  const recentRowIds = new Set(recentRows.map((row) => row.id));
+  const missingRequiredIds = requiredCommentIds.filter(
+    (id) => !recentRowIds.has(id),
+  );
+  const requiredRows = missingRequiredIds.length
+    ? await db
+        .select()
+        .from(issueComments)
+        .where(
+          and(
+            eq(issueComments.companyId, companyId),
+            eq(issueComments.issueId, issueId),
+            inArray(issueComments.id, missingRequiredIds),
+          ),
+        )
+    : [];
+  const windowRows = [...recentRows];
+  let displaced = requiredRows.length;
+  for (
+    let index = windowRows.length - 1;
+    index >= 0 && displaced > 0;
+    index -= 1
+  ) {
+    if (requiredCommentIds.includes(windowRows[index]!.id)) continue;
+    windowRows.splice(index, 1);
+    displaced -= 1;
+  }
+  const rows = [...windowRows, ...requiredRows].sort((left, right) => {
+    const createdAtDiff = left.createdAt.getTime() - right.createdAt.getTime();
+    if (createdAtDiff !== 0) return createdAtDiff;
+    return left.id < right.id ? -1 : left.id > right.id ? 1 : 0;
+  });
   // Missing source rows cannot silently become a claim of complete context.
   if (originCommentIds.some((id) => !rows.some((row) => row.id === id)))
     throw new Error("continuation_source_context_missing");
-  const messages = rows.map((row) => {
-    const safe = input.exposeLowTrustRaw
+  const preparedRows = rows.map((row) => ({
+    row,
+    safe: input.exposeLowTrustRaw
       ? row
-      : sanitizeQuarantinedCommentForHigherTrust(row);
-    return {
-      id: row.id,
-      authorType:
-        row.authorType ??
-        (row.authorUserId ? "user" : row.authorAgentId ? "agent" : "system"),
-      authorId: row.authorUserId ?? row.authorAgentId,
-      createdByRunId: row.createdByRunId,
-      body: row.deletedAt ? "" : safe.body,
-      createdAt: row.createdAt.toISOString(),
-      updatedAt: row.updatedAt.toISOString(),
-      deleted: row.deletedAt !== null,
-      sourceTrust: row.sourceTrust,
-    };
-  });
+      : sanitizeQuarantinedCommentForHigherTrust(row),
+  }));
+  const requiredRowIds = new Set(
+    requiredCommentIds.filter((id) => rows.some((row) => row.id === id)),
+  );
+  const bodyAllowances = new Map<string, number>();
+  let remainingBodyChars = EXECUTION_CONTINUATION_LIMITS.maxCommentBodyTotalChars;
+  const allocateBodyChars = (entries: typeof preparedRows) => {
+    for (const { row, safe } of entries) {
+      const bodyLength = row.deletedAt ? 0 : safe.body.length;
+      const allowed = Math.min(
+        EXECUTION_CONTINUATION_LIMITS.maxCommentBodyChars,
+        remainingBodyChars,
+        bodyLength,
+      );
+      bodyAllowances.set(row.id, allowed);
+      remainingBodyChars -= allowed;
+    }
+  };
+  allocateBodyChars(
+    preparedRows.filter(({ row }) => requiredRowIds.has(row.id)).reverse(),
+  );
+  allocateBodyChars(
+    preparedRows.filter(({ row }) => !requiredRowIds.has(row.id)).reverse(),
+  );
+  const messages = preparedRows.map(({ row, safe }) => ({
+    id: row.id,
+    authorType:
+      row.authorType ??
+      (row.authorUserId ? "user" : row.authorAgentId ? "agent" : "system"),
+    authorId: row.authorUserId ?? row.authorAgentId,
+    createdByRunId: row.createdByRunId,
+    body: row.deletedAt
+      ? ""
+      : safe.body.slice(0, bodyAllowances.get(row.id) ?? 0),
+    createdAt: row.createdAt.toISOString(),
+    updatedAt: row.updatedAt.toISOString(),
+    deleted: row.deletedAt !== null,
+    sourceTrust: row.sourceTrust,
+  }));
   const previousRun = input.previousContextRunId
     ? (
         await db
