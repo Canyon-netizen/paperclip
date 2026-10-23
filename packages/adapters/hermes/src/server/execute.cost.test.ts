@@ -58,8 +58,6 @@ console.log("Fixture completed\\nsession_id: ${SESSION_ID}");
   });
 
   it("leaves the cost out when the output does not carry a number", async () => {
-    // The model's own answer is part of the output. An answer that contains
-    // "spent." matches the cost regex, and the captured text is not a number.
     const result = await execute(context("the round it spent."));
     expect(result.costUsd).toBeUndefined();
     expect(result.resultJson?.cost_usd ?? null).toBeNull();
