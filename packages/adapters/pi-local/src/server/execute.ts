@@ -269,8 +269,7 @@ async function executeProviderWork(
     legacyRemoteExecution: ctx.executionTransport?.remoteExecution,
   });
   const executionTargetIsRemote = adapterExecutionTargetIsRemote(executionTarget);
-  const providerSpawnReceiptIsProof = !executionTargetIsRemote
-    || (executionTarget?.kind === "remote" && executionTarget.transport !== "ssh");
+  const providerSpawnReceiptIsProof = !executionTargetIsRemote;
   const trackProviderDispatch = async (meta: { pid: number; processGroupId: number | null; startedAt: string }) => {
     dispatch.providerDispatchStarted = true;
     await onSpawn?.(meta);

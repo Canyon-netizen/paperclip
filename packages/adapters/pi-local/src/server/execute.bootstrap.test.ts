@@ -10,7 +10,7 @@ const { mocks, testHome } = await vi.hoisted(async () => {
   ]);
   const home = nodePath.join(os.tmpdir(), `paperclip-pi-bootstrap-${process.pid}-${Date.now()}`);
   process.env.HOME = home;
-  const behavior = { kind: "ok" as "ok" | "spawn_refused" | "start_then_fail" };
+  const behavior = { kind: "ok" as "ok" | "spawn_refused" | "start_then_fail" | "remote_fail_without_receipt" };
   const piStdout = JSON.stringify({
     type: "turn_end",
     message: {
@@ -26,6 +26,14 @@ const { mocks, testHome } = await vi.hoisted(async () => {
       behavior,
       ensureAdapterExecutionTargetCommandResolvable: vi.fn(async () => undefined),
       ensureAdapterExecutionTargetRuntimeCommandInstalled: vi.fn(async () => undefined),
+      prepareAdapterExecutionTargetRuntime: vi.fn(async () => ({
+        workspaceRemoteDir: "/remote/workspace",
+        runtimeRootDir: "/remote/runtime",
+        assetDirs: { skills: "/remote/skills", attribution: "/remote/attribution" },
+        restoreWorkspace: async () => {},
+      })),
+      startAdapterExecutionTargetPaperclipBridge: vi.fn(async () => null),
+      ensureAdapterExecutionTargetFile: vi.fn(async () => undefined),
       ensurePiModelConfiguredAndAvailable: vi.fn(async () => [
         { id: "openai/gpt-5.4-mini", label: "openai/gpt-5.4-mini" },
       ]),
@@ -38,6 +46,9 @@ const { mocks, testHome } = await vi.hoisted(async () => {
       ) => {
         if (behavior.kind === "spawn_refused") {
           throw Object.assign(new Error("spawn pi EAGAIN"), { code: "EAGAIN" });
+        }
+        if (behavior.kind === "remote_fail_without_receipt") {
+          throw new Error("sandbox provider lost the session");
         }
         if (behavior.kind === "start_then_fail") {
           await options.onSpawn?.({ pid: 4242, processGroupId: null, startedAt: new Date().toISOString() });
@@ -65,6 +76,9 @@ vi.mock("@paperclipai/adapter-utils/execution-target", async () => {
     ...actual,
     ensureAdapterExecutionTargetCommandResolvable: mocks.ensureAdapterExecutionTargetCommandResolvable,
     ensureAdapterExecutionTargetRuntimeCommandInstalled: mocks.ensureAdapterExecutionTargetRuntimeCommandInstalled,
+    prepareAdapterExecutionTargetRuntime: mocks.prepareAdapterExecutionTargetRuntime,
+    startAdapterExecutionTargetPaperclipBridge: mocks.startAdapterExecutionTargetPaperclipBridge,
+    ensureAdapterExecutionTargetFile: mocks.ensureAdapterExecutionTargetFile,
     runAdapterExecutionTargetProcess: mocks.runAdapterExecutionTargetProcess,
   };
 });
@@ -160,6 +174,26 @@ describe("pi pre-provider failure accounting", () => {
     mocks.behavior.kind = "start_then_fail";
 
     await expect(execute(context())).rejects.toThrow("provider process crashed");
+  });
+
+  it("keeps a sandbox dispatch failure conservative because the sandbox runner reports no spawn receipt", async () => {
+    mocks.behavior.kind = "remote_fail_without_receipt";
+
+    await expect(
+      execute({
+        ...context(),
+        executionTarget: {
+          kind: "remote" as const,
+          transport: "sandbox" as const,
+          remoteCwd: "/remote/workspace",
+          timeoutMs: 60_000,
+          runner: {
+            execute: async () => ({ exitCode: 0, stdout: "", stderr: "" }),
+          },
+        },
+      }),
+    ).rejects.toThrow("sandbox provider lost the session");
+    expect(mocks.runAdapterExecutionTargetProcess).toHaveBeenCalledOnce();
   });
 
   it("never labels a completed provider run as a pre-provider failure", async () => {
