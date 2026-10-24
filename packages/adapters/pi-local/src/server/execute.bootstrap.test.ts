@@ -45,7 +45,10 @@ const { mocks, testHome } = await vi.hoisted(async () => {
         options: { onSpawn?: (meta: { pid: number; processGroupId: number | null; startedAt: string }) => Promise<void> },
       ) => {
         if (behavior.kind === "spawn_refused") {
-          throw Object.assign(new Error("spawn pi EAGAIN"), { code: "EAGAIN" });
+          throw Object.assign(
+            new Error('Failed to start command "pi" in "/workspace": spawn pi EMFILE'),
+            { code: "EMFILE" },
+          );
         }
         if (behavior.kind === "remote_fail_without_receipt") {
           throw new Error("sandbox provider lost the session");
@@ -167,7 +170,25 @@ describe("pi pre-provider failure accounting", () => {
       errorFamily: "transient_upstream",
       executionRecovery: { kind: "bootstrap", providerWorkStarted: false },
     });
-    expect(result.errorMessage).toContain("EAGAIN");
+    expect(result.errorMessage).toContain("EMFILE");
+  });
+
+  it("classifies a refused model discovery spawn as a transient upstream failure", async () => {
+    mocks.ensurePiModelConfiguredAndAvailable.mockRejectedValueOnce(
+      Object.assign(
+        new Error('Failed to start command "pi" in "/workspace": spawn pi EMFILE'),
+        { code: "EMFILE" },
+      ),
+    );
+
+    const result = await execute(context());
+
+    expect(result).toMatchObject({
+      errorCode: "pi_bootstrap_failed",
+      errorFamily: "transient_upstream",
+      executionRecovery: { kind: "bootstrap", providerWorkStarted: false },
+    });
+    expect(mocks.runAdapterExecutionTargetProcess).not.toHaveBeenCalled();
   });
 
   it("keeps a failure after the provider process started unproven", async () => {
