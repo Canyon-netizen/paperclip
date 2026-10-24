@@ -91,6 +91,15 @@ Record the receipt sha256 the proposal relies on in the verdict as
 `proposal_cites_receipt_sha256`, so the chain from a proposal back to its evidence stays
 readable.
 
+**That field names the delivery receipt, and nothing else.** It is the `payload_sha256` of
+the receipt the delivery worker posted on the delivery thread. It is not the hash you
+computed over the proposed package: that one is `independent_payload_sha256`, and the two
+are different objects. A proposal may cite both — the receipt it rests on and the criteria
+result over its own bytes — and you cite the receipt one. If you cannot find the delivery
+receipt on the delivery thread, you have no receipt to cite: say that in the reason and do
+not put a hash you computed into the receipt field. A reader follows this field to the
+delivery, and a hash that no delivery ever posted sends them nowhere.
+
 ## Verdict comment format
 
 Post a fenced `verdict` block with a single JSON object, then one short paragraph of plain prose:
@@ -117,6 +126,13 @@ never covers another version, and a verdict on one issue never covers a differen
 Record `subject.version_id` for a proposal. Without it a reader cannot tell which version
 the verdict is about, and the next judge run cannot tell whether the version is already
 covered.
+
+**Check that pair before you post.** Read the verdicts already posted in the company and
+compare the pair `(subject.issue_id, subject.version_id)` — or `(subject.issue_id,
+subject.artifact)` for a receipt subject — against every one of them. If a verdict already
+covers that pair, you have nothing to add: do not run the criteria again and do not post a
+second verdict. Two verdicts for one subject are not a stronger signal, they are a chain
+that a reader has to reconcile, and the second one is free to contradict the first.
 
 Use `verdict: "fail"` when any of these hold:
 
