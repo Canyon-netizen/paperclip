@@ -127,12 +127,15 @@ Record `subject.version_id` for a proposal. Without it a reader cannot tell whic
 the verdict is about, and the next judge run cannot tell whether the version is already
 covered.
 
-**Check that pair before you post.** Read the verdicts already posted in the company and
-compare the pair `(subject.issue_id, subject.version_id)` — or `(subject.issue_id,
-subject.artifact)` for a receipt subject — against every one of them. If a verdict already
-covers that pair, you have nothing to add: do not run the criteria again and do not post a
-second verdict. Two verdicts for one subject are not a stronger signal, they are a chain
-that a reader has to reconcile, and the second one is free to contradict the first.
+**Check that subject before you post.** Read the verdicts already posted in the company and
+compare the subject against every one of them. For a proposal, compare the pair
+`(subject.issue_id, subject.version_id)`. For a receipt, compare the receipt's
+`payload_sha256` with the `adjudicated_receipt_sha256` of each verdict: a corrected
+delivery is a new receipt with a new hash on the same issue, and it needs its own
+verdict. If a verdict already covers that subject, you have nothing to add: do not run the
+criteria again and do not post a second verdict. Two verdicts for one subject are not a
+stronger signal, they are a chain that a reader has to reconcile, and the second one is
+free to contradict the first.
 
 Use `verdict: "fail"` when any of these hold:
 
