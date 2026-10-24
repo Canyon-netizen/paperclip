@@ -8,13 +8,20 @@ const {
   ensureAdapterExecutionTargetCommandResolvable,
   maybeRunSandboxInstallCommand,
   ensureAdapterExecutionTargetDirectory,
+  prepareAdapterExecutionTargetRuntime,
   listModelsEnv,
   probeEnv,
   modelsJsonDuringProbe,
+  stagedAgentConfigDir,
+  stagingFailure,
 } = vi.hoisted(() => {
   const listModelsEnv: { value: Record<string, string> | null } = { value: null };
   const probeEnv: { value: Record<string, string> | null } = { value: null };
   const modelsJsonDuringProbe: { value: string | null } = { value: null };
+  const stagedAgentConfigDir: { value: string | null } = {
+    value: "/remote/workspace/.paperclip-runtime/pi/agentConfig",
+  };
+  const stagingFailure: { value: Error | null } = { value: null };
   const captureModelsJson = (env: Record<string, string> | null | undefined) => {
     const dir = env?.PI_CODING_AGENT_DIR;
     if (!dir || modelsJsonDuringProbe.value !== null) return;
@@ -28,6 +35,8 @@ const {
     listModelsEnv,
     probeEnv,
     modelsJsonDuringProbe,
+    stagedAgentConfigDir,
+    stagingFailure,
     runChildProcess: vi.fn(async (_runId: string, _command: string, _args: string[], options: { env?: Record<string, string> }) => {
       listModelsEnv.value = options?.env ?? null;
       captureModelsJson(listModelsEnv.value);
@@ -62,6 +71,22 @@ const {
     ensureAdapterExecutionTargetCommandResolvable: vi.fn(async () => {}),
     maybeRunSandboxInstallCommand: vi.fn(async () => null),
     ensureAdapterExecutionTargetDirectory: vi.fn(async () => {}),
+    prepareAdapterExecutionTargetRuntime: vi.fn(async (input: { assets?: { key: string; localDir: string }[] }) => {
+      if (stagingFailure.value) throw stagingFailure.value;
+      const agentConfig = (input.assets ?? []).find((asset) => asset.key === "agentConfig");
+      return {
+        target: { kind: "remote" as const, transport: "ssh" as const },
+        workspaceRemoteDir: "/remote/workspace",
+        runtimeRootDir: null,
+        assetDirs: agentConfig && stagedAgentConfigDir.value
+          ? { agentConfig: stagedAgentConfigDir.value }
+          : {},
+        additionalSourceDirs: {},
+        additionalSourceFailures: [],
+        workspaceSyncSnapshot: null,
+        restoreWorkspace: async () => {},
+      };
+    }),
   };
 });
 
@@ -82,6 +107,7 @@ vi.mock("@paperclipai/adapter-utils/execution-target", async () => {
     ensureAdapterExecutionTargetCommandResolvable,
     maybeRunSandboxInstallCommand,
     runAdapterExecutionTargetProcess,
+    prepareAdapterExecutionTargetRuntime,
   };
 });
 
@@ -96,11 +122,29 @@ const PROVIDERS = {
   },
 };
 
+const REMOTE_TARGET = {
+  kind: "remote" as const,
+  transport: "ssh" as const,
+  remoteCwd: "/remote/workspace",
+  spec: {
+    host: "127.0.0.1",
+    port: 2222,
+    username: "fixture",
+    remoteWorkspacePath: "/remote/workspace",
+    remoteCwd: "/remote/workspace",
+    privateKey: "PRIVATE KEY",
+    knownHosts: "[127.0.0.1]:2222 ssh-ed25519 AAAA",
+    strictHostKeyChecking: true,
+  },
+};
+
 afterEach(() => {
   vi.clearAllMocks();
   listModelsEnv.value = null;
   probeEnv.value = null;
   modelsJsonDuringProbe.value = null;
+  stagedAgentConfigDir.value = "/remote/workspace/.paperclip-runtime/pi/agentConfig";
+  stagingFailure.value = null;
 });
 
 describe("pi configuration check", () => {
@@ -136,6 +180,24 @@ describe("pi configuration check", () => {
     expect(fs.existsSync(String(listEnv?.PI_CODING_AGENT_DIR))).toBe(false);
   });
 
+  it("lists models once for the whole check", async () => {
+    await testEnvironment({
+      companyId: "company-1",
+      adapterType: "pi_local",
+      config: {
+        command: "pi",
+        model: "minimax/MiniMax-M3",
+        env: {
+          ANTHROPIC_API_KEY: "sk-test-key",
+          PAPERCLIP_PI_PROVIDERS: JSON.stringify(PROVIDERS),
+        },
+      },
+    });
+
+    expect(runChildProcess).toHaveBeenCalledTimes(1);
+    expect(listModelsEnv.value?.PI_CODING_AGENT_DIR).toBeTruthy();
+  });
+
   it("leaves the environment alone when no providers are configured", async () => {
     const result = await testEnvironment({
       companyId: "company-1",
@@ -150,5 +212,60 @@ describe("pi configuration check", () => {
     expect(result.status).not.toBe("fail");
     expect(listModelsEnv.value?.PI_CODING_AGENT_DIR).toBeUndefined();
     expect(probeEnv.value?.PI_CODING_AGENT_DIR).toBeUndefined();
+  });
+
+  it("points the remote probe at the provider config staged on the target", async () => {
+    const result = await testEnvironment({
+      companyId: "company-1",
+      adapterType: "pi_local",
+      config: {
+        command: "pi",
+        model: "minimax/MiniMax-M3",
+        env: {
+          ANTHROPIC_API_KEY: "sk-test-key",
+          PAPERCLIP_PI_PROVIDERS: JSON.stringify(PROVIDERS),
+        },
+      },
+      executionTarget: REMOTE_TARGET,
+      environmentName: "Remote build box",
+    });
+
+    expect(prepareAdapterExecutionTargetRuntime).toHaveBeenCalledWith(
+      expect.objectContaining({
+        adapterKey: "pi",
+        syncWorkspace: false,
+        assets: [expect.objectContaining({ key: "agentConfig" })],
+      }),
+    );
+    expect(probeEnv.value?.PI_CODING_AGENT_DIR).toBe(
+      "/remote/workspace/.paperclip-runtime/pi/agentConfig",
+    );
+    expect(result.checks.find((check) => check.code === "pi_hello_probe_passed")?.level).toBe("info");
+    expect(result.checks.find((check) => check.code === "pi_provider_config_not_staged")).toBeUndefined();
+  });
+
+  it("reports a provider config that could not be staged to the target", async () => {
+    stagingFailure.value = new Error("staging refused");
+
+    const result = await testEnvironment({
+      companyId: "company-1",
+      adapterType: "pi_local",
+      config: {
+        command: "pi",
+        model: "minimax/MiniMax-M3",
+        env: {
+          ANTHROPIC_API_KEY: "sk-test-key",
+          PAPERCLIP_PI_PROVIDERS: JSON.stringify(PROVIDERS),
+        },
+      },
+      executionTarget: REMOTE_TARGET,
+      environmentName: "Remote build box",
+    });
+
+    const check = result.checks.find((entry) => entry.code === "pi_provider_config_not_staged");
+    expect(check?.level).toBe("error");
+    expect(check?.detail).toContain("staging refused");
+    expect(result.status).toBe("fail");
+    expect(runAdapterExecutionTargetProcess).not.toHaveBeenCalled();
   });
 });

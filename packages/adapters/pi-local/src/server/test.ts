@@ -18,6 +18,7 @@ import {
   runAdapterExecutionTargetProcess,
   describeAdapterExecutionTarget,
   resolveAdapterExecutionTargetCwd,
+  prepareAdapterExecutionTargetRuntime,
 } from "@paperclipai/adapter-utils/execution-target";
 import { discoverPiModelsCached } from "./models.js";
 import { parsePiJsonl } from "./parse.js";
@@ -47,20 +48,24 @@ function summarizeProbeDetail(stdout: string, stderr: string, parsedError: strin
   return clean.length > max ? `${clean.slice(0, max - 1)}...` : clean;
 }
 
-async function withPiProviderEnv<T>(
+type PiProviderProbeEnv = {
+  env: Record<string, string>;
+  agentConfigDir: string | null;
+  cleanup: () => Promise<void>;
+};
+
+async function preparePiProviderProbeEnv(
   runtimeEnv: Record<string, string>,
   env: Record<string, string>,
-  fn: (runtimeEnv: Record<string, string>) => Promise<T>,
-): Promise<T> {
+): Promise<PiProviderProbeEnv> {
   const prepared = await preparePiRuntimeConfig({ env });
-  try {
-    const providerEnv = prepared.agentConfigDir
+  return {
+    env: prepared.agentConfigDir
       ? { ...runtimeEnv, PI_CODING_AGENT_DIR: prepared.agentConfigDir }
-      : runtimeEnv;
-    return await fn(providerEnv);
-  } finally {
-    await prepared.cleanup();
-  }
+      : runtimeEnv,
+    agentConfigDir: prepared.agentConfigDir,
+    cleanup: prepared.cleanup,
+  };
 }
 
 function normalizeEnv(input: unknown): Record<string, string> {
@@ -98,6 +103,30 @@ function buildPiModelDiscoveryFailureCheck(message: string): AdapterEnvironmentC
 export async function testEnvironment(
   ctx: AdapterEnvironmentTestContext,
 ): Promise<AdapterEnvironmentTestResult> {
+  const config = parseObject(ctx.config);
+  const envConfig = parseObject(config.env);
+  const env: Record<string, string> = {};
+  for (const [key, value] of Object.entries(envConfig)) {
+    if (typeof value === "string") env[key] = value;
+  }
+  const runtimeEnv = normalizeEnv(ensurePathInEnv({ ...process.env, ...env }));
+  const providerProbe = await preparePiProviderProbeEnv(runtimeEnv, env);
+  try {
+    return await runPiConfigurationChecks(ctx, { env, runtimeEnv, providerProbe });
+  } finally {
+    await providerProbe.cleanup();
+  }
+}
+
+async function runPiConfigurationChecks(
+  ctx: AdapterEnvironmentTestContext,
+  prepared: {
+    env: Record<string, string>;
+    runtimeEnv: Record<string, string>;
+    providerProbe: PiProviderProbeEnv;
+  },
+): Promise<AdapterEnvironmentTestResult> {
+  const { env, runtimeEnv, providerProbe } = prepared;
   const checks: AdapterEnvironmentCheck[] = [];
   const config = parseObject(ctx.config);
   const command = asString(config.command, "pi");
@@ -136,13 +165,6 @@ export async function testEnvironment(
       detail: cwd,
     });
   }
-
-  const envConfig = parseObject(config.env);
-  const env: Record<string, string> = {};
-  for (const [key, value] of Object.entries(envConfig)) {
-    if (typeof value === "string") env[key] = value;
-  }
-  const runtimeEnv = normalizeEnv(ensurePathInEnv({ ...process.env, ...env }));
 
   const cwdInvalid = checks.some((check) => check.code === "pi_cwd_invalid");
   if (cwdInvalid) {
@@ -187,7 +209,7 @@ export async function testEnvironment(
   // model/auth issues directly.
   if (!targetIsRemote && canRunProbe) {
     try {
-      const discovered = await withPiProviderEnv(runtimeEnv, env, (probeEnv) => discoverPiModelsCached({ command, cwd, env: probeEnv }));
+      const discovered = await discoverPiModelsCached({ command, cwd, env: providerProbe.env });
       if (discovered.length > 0) {
         checks.push({
           code: "pi_models_discovered",
@@ -228,7 +250,7 @@ export async function testEnvironment(
   } else if (canRunProbe) {
     // Verify model is in the list
     try {
-      const discovered = await withPiProviderEnv(runtimeEnv, env, (probeEnv) => discoverPiModelsCached({ command, cwd, env: probeEnv }));
+      const discovered = await discoverPiModelsCached({ command, cwd, env: providerProbe.env });
       const modelExists = discovered.some((m: { id: string }) => m.id === configuredModel);
       if (modelExists) {
         checks.push({
@@ -254,7 +276,41 @@ export async function testEnvironment(
     }
   }
 
-  if (canRunProbe && configuredModel) {
+  let probeEnv = providerProbe.env;
+  let providerAvailable = true;
+  if (canRunProbe && configuredModel && targetIsRemote && providerProbe.agentConfigDir) {
+    try {
+      const preparedRemoteRuntime = await prepareAdapterExecutionTargetRuntime({
+        runId,
+        target,
+        adapterKey: "pi",
+        workspaceLocalDir: cwd,
+        syncWorkspace: false,
+        assets: [
+          {
+            key: "agentConfig",
+            localDir: providerProbe.agentConfigDir,
+          },
+        ],
+      });
+      const remoteAgentConfigDir = preparedRemoteRuntime.assetDirs.agentConfig;
+      if (!remoteAgentConfigDir) {
+        throw new Error("Pi provider configuration was not staged to the execution target.");
+      }
+      probeEnv = { ...probeEnv, PI_CODING_AGENT_DIR: remoteAgentConfigDir };
+    } catch (err) {
+      providerAvailable = false;
+      checks.push({
+        code: "pi_provider_config_not_staged",
+        level: "error",
+        message: "Pi provider configuration could not be staged to the execution target.",
+        detail: err instanceof Error ? err.message : String(err),
+        hint: "Pi on the execution target cannot read the provider configuration stored on the Paperclip host.",
+      });
+    }
+  }
+
+  if (canRunProbe && configuredModel && providerAvailable) {
     // Parse model for probe
     const provider = configuredModel.includes("/") 
       ? configuredModel.slice(0, configuredModel.indexOf("/")) 
@@ -277,20 +333,18 @@ export async function testEnvironment(
     if (extraArgs.length > 0) args.push(...extraArgs);
 
     try {
-      const probe = await withPiProviderEnv(runtimeEnv, env, (probeEnv) =>
-        runAdapterExecutionTargetProcess(
-          runId,
-          target,
-          command,
-          args,
-          {
-            cwd,
-            env: probeEnv,
-            timeoutSec: 60,
-            graceSec: 5,
-            onLog: async () => {},
-          },
-        ),
+      const probe = await runAdapterExecutionTargetProcess(
+        runId,
+        target,
+        command,
+        args,
+        {
+          cwd,
+          env: probeEnv,
+          timeoutSec: 60,
+          graceSec: 5,
+          onLog: async () => {},
+        },
       );
 
       const parsed = parsePiJsonl(probe.stdout);
