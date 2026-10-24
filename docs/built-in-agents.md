@@ -196,6 +196,18 @@ Two request-shape details decide whether that gate exists at all:
 - `payload.version` is **required** and must be the integer `1`. A body without it is a
   400, and an agent that gets a 400 learns nothing.
 
+A third detail decides whether the gate can be **judged**. The target carries the proposed
+version id:
+
+```json
+"target": { "type": "custom", "key": "skill:<skillId>", "revisionId": "<the proposed version id>" }
+```
+
+The judge rules on one version id, and the version id is what says which bytes a verdict
+covers. Without it the confirmation names only the skill, the next proposal moves the library
+head, and nothing identifies the version the human was asked to accept. The proposed version
+id also belongs in the proposal comment, for the same reason.
+
 ### The learner needs the read-side peer grant
 
 `learning` carries two default grants, and the split between them is the separation of
@@ -217,6 +229,12 @@ The read grant does not give the learner the power to install. `agent_config:upd
 a peer still requires `agents:configure` or an accepted change consent, and installing a
 skill version is a human decision on the confirmation. Reading what is live and moving
 it stay separate acts.
+
+The pin has to exist. A worker without a pin runs the library head, and writing a version
+moves the head, so a proposal written against an unpinned skill reaches the worker before
+the judge rules on it and before the human accepts it. The learner contract therefore makes
+the learner stop and ask an operator to pin the workers when it finds no pin. An operator
+who wants the loop to run has to pin the delivery workers first.
 
 Do not rely on the agent remembering either of them. `companies.interactionResolverGovernance`
 caps the resolver policy per interaction kind, and the cap wins over what the agent asked

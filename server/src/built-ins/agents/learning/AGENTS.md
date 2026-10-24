@@ -36,9 +36,11 @@ Amend the version that is **live**, not the version that was written last. Those
 
 - The version that is live is the one the delivery workers are pinned to. Read it from the pin: `GET /api/agents/{agentId}/skills` returns `desiredSkillEntries`, and the `versionId` there is the approved, running version. You have a read-side grant for this (`agents:suggest-changes`), and you need it: a proposal has to be built on the document that is actually in effect.
 - The version that was written last is the library head, `currentVersionId` on the skill record. It moves every time anybody writes the skill - including every proposal you make. Right after a human rejects a proposal, the head **is** the rejected document. A proposal built on the head asks the human to approve a descendant of the thing they just turned down, and it smuggles the rejected wording back in.
-- If the workers have no pin for the skill, nothing is pinned: the live version is then the head, and the head is the right base.
+- If the workers have no pin for the skill, stop and do not write. Writing a version moves the library head, and a worker without a pin runs the head, so a proposal would reach the workers before the judge or the human rules on it. Ask an operator who holds `agents:configure` to pin the workers to the approved version, and mark the task blocked with an `unblockDescriptor` that names that operator and that action.
 
 Read the base version's whole `fileInventory`, not only `SKILL.md`, and amend from those bytes. A file you did not touch is inherited by the new version from whatever is in the skill directory, so a rejected version's leftover file can ride along in your proposal. If a file in the live directory differs from the base version, write the base version's bytes for it before you write your own change, so what the human reviews is the approved document plus your change and nothing else.
+
+Compare the two file lists as well. A file that a rejected proposal added has no approved bytes to write back, so restoring the base version does not remove it, and it stays in the next version. Delete every path in the live directory that the base version's `fileInventory` does not have, and only then apply your own change.
 5. Post the proposal and open the human gate.
 
 ## Writing the new skill version
@@ -51,8 +53,8 @@ Read the base version's whole `fileInventory`, not only `SKILL.md`, and amend fr
 
 ## The proposal and the human gate
 
-- Post a comment on your task that contains the full diff of the proposed skill version as a fenced `diff` block, plus the list of receipt sha256 values the proposal relies on.
-- Create a `request_confirmation` interaction with `POST /api/issues/{issueId}/interactions`. `kind` is `request_confirmation`, `continuationPolicy` is `none`, `resolverPolicy` is `human_only`, and `payload.target` is `{ "type": "custom", "key": "skill:<skillId>" }` where `<skillId>` is the methodology skill's id. Put the same diff in `payload.detailsMarkdown`, a short yes/no question in `payload.prompt`, and set `supersedeOnUserComment: true`. `payload.version` is required and must be the integer `1`:
+- Post a comment on your task that contains the full diff of the proposed skill version as a fenced `diff` block, the list of receipt sha256 values the proposal relies on, and the proposed version id. The judge rules on one version id. A proposal that names only the skill and a diff cannot be judged, because the next proposal moves the library head and the diff no longer identifies the version.
+- Create a `request_confirmation` interaction with `POST /api/issues/{issueId}/interactions`. `kind` is `request_confirmation`, `continuationPolicy` is `none`, `resolverPolicy` is `human_only`, and `payload.target` is `{ "type": "custom", "key": "skill:<skillId>", "revisionId": "<the proposed version id>" }` where `<skillId>` is the methodology skill's id and `<the proposed version id>` is the version you just wrote. Put the same diff and the same version id in `payload.detailsMarkdown`, a short yes/no question in `payload.prompt`, and set `supersedeOnUserComment: true`. `payload.version` is required and must be the integer `1`:
 
 ```sh
 curl -X POST "$PAPERCLIP_API_URL/api/issues/$PAPERCLIP_TASK_ID/interactions" \
@@ -65,10 +67,10 @@ curl -X POST "$PAPERCLIP_API_URL/api/issues/$PAPERCLIP_TASK_ID/interactions" \
     "resolverPolicy": "human_only",
     "payload": {
       "version": 1,
-      "prompt": "Install this delivery-methodology version (skill <skillId>)?",
-      "detailsMarkdown": "<the diff and the receipt sha256 values it relies on>",
+      "prompt": "Install this delivery-methodology version (skill <skillId>, version <the proposed version id>)?",
+      "detailsMarkdown": "<the diff, the proposed version id, and the receipt sha256 values it relies on>",
       "supersedeOnUserComment": true,
-      "target": { "type": "custom", "key": "skill:<skillId>" }
+      "target": { "type": "custom", "key": "skill:<skillId>", "revisionId": "<the proposed version id>" }
     }
   }'
 ```
