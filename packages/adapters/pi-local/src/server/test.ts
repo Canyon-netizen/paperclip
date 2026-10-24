@@ -1,3 +1,5 @@
+import path from "node:path";
+
 import type {
   AdapterEnvironmentCheck,
   AdapterEnvironmentTestContext,
@@ -110,7 +112,26 @@ export async function testEnvironment(
     if (typeof value === "string") env[key] = value;
   }
   const runtimeEnv = normalizeEnv(ensurePathInEnv({ ...process.env, ...env }));
-  const providerProbe = await preparePiProviderProbeEnv(runtimeEnv, env);
+  let providerProbe: PiProviderProbeEnv;
+  try {
+    providerProbe = await preparePiProviderProbeEnv(runtimeEnv, env);
+  } catch (err) {
+    const checks: AdapterEnvironmentCheck[] = [
+      {
+        code: "pi_provider_config_failed",
+        level: "error",
+        message: "Pi provider configuration could not be prepared.",
+        detail: err instanceof Error ? err.message : String(err),
+        hint: "Check that the temporary directory is writable and that the provider configuration is valid.",
+      },
+    ];
+    return {
+      adapterType: ctx.adapterType,
+      status: summarizeStatus(checks),
+      checks,
+      testedAt: new Date().toISOString(),
+    };
+  }
   try {
     return await runPiConfigurationChecks(ctx, { env, runtimeEnv, providerProbe });
   } finally {
@@ -280,11 +301,19 @@ async function runPiConfigurationChecks(
   let providerAvailable = true;
   if (canRunProbe && configuredModel && targetIsRemote && providerProbe.agentConfigDir) {
     try {
+      const remoteWorkspaceDir = path.posix.join(
+        target.remoteCwd,
+        ".paperclip-runtime",
+        "runs",
+        runId,
+        "workspace",
+      );
       const preparedRemoteRuntime = await prepareAdapterExecutionTargetRuntime({
         runId,
         target,
         adapterKey: "pi",
         workspaceLocalDir: cwd,
+        workspaceRemoteDir: remoteWorkspaceDir,
         syncWorkspace: false,
         assets: [
           {

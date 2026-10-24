@@ -14,6 +14,8 @@ const {
   modelsJsonDuringProbe,
   stagedAgentConfigDir,
   stagingFailure,
+  prepareFailure,
+  preparedRuntimeCalls,
 } = vi.hoisted(() => {
   const listModelsEnv: { value: Record<string, string> | null } = { value: null };
   const probeEnv: { value: Record<string, string> | null } = { value: null };
@@ -22,6 +24,8 @@ const {
     value: "/remote/workspace/.paperclip-runtime/pi/agentConfig",
   };
   const stagingFailure: { value: Error | null } = { value: null };
+  const prepareFailure: { value: Error | null } = { value: null };
+  const preparedRuntimeCalls: { value: { workspaceRemoteDir?: string }[] } = { value: [] };
   const captureModelsJson = (env: Record<string, string> | null | undefined) => {
     const dir = env?.PI_CODING_AGENT_DIR;
     if (!dir || modelsJsonDuringProbe.value !== null) return;
@@ -37,6 +41,8 @@ const {
     modelsJsonDuringProbe,
     stagedAgentConfigDir,
     stagingFailure,
+    prepareFailure,
+    preparedRuntimeCalls,
     runChildProcess: vi.fn(async (_runId: string, _command: string, _args: string[], options: { env?: Record<string, string> }) => {
       listModelsEnv.value = options?.env ?? null;
       captureModelsJson(listModelsEnv.value);
@@ -71,7 +77,8 @@ const {
     ensureAdapterExecutionTargetCommandResolvable: vi.fn(async () => {}),
     maybeRunSandboxInstallCommand: vi.fn(async () => null),
     ensureAdapterExecutionTargetDirectory: vi.fn(async () => {}),
-    prepareAdapterExecutionTargetRuntime: vi.fn(async (input: { assets?: { key: string; localDir: string }[] }) => {
+    prepareAdapterExecutionTargetRuntime: vi.fn(async (input: { assets?: { key: string; localDir: string }[]; workspaceRemoteDir?: string }) => {
+      preparedRuntimeCalls.value.push({ workspaceRemoteDir: input.workspaceRemoteDir });
       if (stagingFailure.value) throw stagingFailure.value;
       const agentConfig = (input.assets ?? []).find((asset) => asset.key === "agentConfig");
       return {
@@ -111,6 +118,17 @@ vi.mock("@paperclipai/adapter-utils/execution-target", async () => {
   };
 });
 
+vi.mock("./runtime-config.js", async () => {
+  const actual = await vi.importActual<typeof import("./runtime-config.js")>("./runtime-config.js");
+  return {
+    ...actual,
+    preparePiRuntimeConfig: vi.fn(async (input: Parameters<typeof actual.preparePiRuntimeConfig>[0]) => {
+      if (prepareFailure.value) throw prepareFailure.value;
+      return actual.preparePiRuntimeConfig(input);
+    }),
+  };
+});
+
 import { testEnvironment } from "./test.js";
 
 const PROVIDERS = {
@@ -145,6 +163,8 @@ afterEach(() => {
   modelsJsonDuringProbe.value = null;
   stagedAgentConfigDir.value = "/remote/workspace/.paperclip-runtime/pi/agentConfig";
   stagingFailure.value = null;
+  prepareFailure.value = null;
+  preparedRuntimeCalls.value = [];
 });
 
 describe("pi configuration check", () => {
@@ -266,6 +286,62 @@ describe("pi configuration check", () => {
     expect(check?.level).toBe("error");
     expect(check?.detail).toContain("staging refused");
     expect(result.status).toBe("fail");
+    expect(runAdapterExecutionTargetProcess).not.toHaveBeenCalled();
+  });
+
+  it("stages each check's provider config in its own remote directory", async () => {
+    const config = {
+      command: "pi",
+      model: "minimax/MiniMax-M3",
+      env: {
+        ANTHROPIC_API_KEY: "sk-test-key",
+        PAPERCLIP_PI_PROVIDERS: JSON.stringify(PROVIDERS),
+      },
+    };
+
+    await testEnvironment({
+      companyId: "company-1",
+      adapterType: "pi_local",
+      config,
+      executionTarget: REMOTE_TARGET,
+      environmentName: "Remote build box",
+    });
+    await testEnvironment({
+      companyId: "company-1",
+      adapterType: "pi_local",
+      config,
+      executionTarget: REMOTE_TARGET,
+      environmentName: "Remote build box",
+    });
+
+    const dirs = preparedRuntimeCalls.value.map((call) => call.workspaceRemoteDir);
+    expect(dirs).toHaveLength(2);
+    expect(dirs[0]).toBeTruthy();
+    expect(dirs[0]).toContain(".paperclip-runtime/runs/");
+    expect(dirs[1]).not.toBe(dirs[0]);
+  });
+
+  it("reports a provider configuration that could not be prepared as a failed check", async () => {
+    prepareFailure.value = new Error("no space left on device");
+
+    const result = await testEnvironment({
+      companyId: "company-1",
+      adapterType: "pi_local",
+      config: {
+        command: "pi",
+        model: "minimax/MiniMax-M3",
+        env: {
+          ANTHROPIC_API_KEY: "sk-test-key",
+          PAPERCLIP_PI_PROVIDERS: JSON.stringify(PROVIDERS),
+        },
+      },
+    });
+
+    const check = result.checks.find((entry) => entry.code === "pi_provider_config_failed");
+    expect(check?.level).toBe("error");
+    expect(check?.detail).toContain("no space left on device");
+    expect(result.status).toBe("fail");
+    expect(runChildProcess).not.toHaveBeenCalled();
     expect(runAdapterExecutionTargetProcess).not.toHaveBeenCalled();
   });
 });
