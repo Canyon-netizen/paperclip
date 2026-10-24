@@ -18,14 +18,19 @@ import {
   maybeRunSandboxInstallCommand,
   ensureAdapterExecutionTargetDirectory,
   runAdapterExecutionTargetProcess,
+  runAdapterExecutionTargetShellCommand,
   describeAdapterExecutionTarget,
   resolveAdapterExecutionTargetCwd,
   prepareAdapterExecutionTargetRuntime,
 } from "@paperclipai/adapter-utils/execution-target";
+import type { AdapterExecutionTarget } from "@paperclipai/adapter-utils/execution-target";
+import { shellQuote } from "@paperclipai/adapter-utils/ssh";
 import { discoverPiModelsCached } from "./models.js";
 import { parsePiJsonl } from "./parse.js";
 import { preparePiRuntimeConfig } from "./runtime-config.js";
 import { SANDBOX_INSTALL_COMMAND } from "../index.js";
+
+type RemoteExecutionTarget = Extract<AdapterExecutionTarget, { kind: "remote" }>;
 
 function summarizeStatus(checks: AdapterEnvironmentCheck[]): AdapterEnvironmentTestResult["status"] {
   if (checks.some((check) => check.level === "error")) return "fail";
@@ -77,6 +82,38 @@ function normalizeEnv(input: unknown): Record<string, string> {
     if (typeof value === "string") env[key] = value;
   }
   return env;
+}
+
+function remoteCheckDirectory(target: RemoteExecutionTarget, runId: string): string {
+  return path.posix.join(target.remoteCwd, ".paperclip-runtime", "runs", runId);
+}
+
+async function removeRemoteCheckDirectory(
+  runId: string,
+  target: RemoteExecutionTarget,
+  directory: string,
+): Promise<void> {
+  const result = await runAdapterExecutionTargetShellCommand(
+    runId,
+    target,
+    `rm -rf -- ${shellQuote(directory)}`,
+    {
+      cwd: target.remoteCwd,
+      env: {},
+      timeoutSec: 30,
+      graceSec: 5,
+      onLog: async () => {},
+    },
+  );
+  if (result.timedOut) {
+    throw new Error(`Timed out removing the remote check directory "${directory}".`);
+  }
+  if ((result.exitCode ?? 1) !== 0) {
+    const detail = (result.stderr || result.stdout || "").trim();
+    throw new Error(
+      `Could not remove the remote check directory "${directory}" (exit ${result.exitCode ?? "none"})${detail ? `: ${detail}` : "."}`,
+    );
+  }
 }
 
 const PI_AUTH_REQUIRED_RE =
@@ -299,15 +336,11 @@ async function runPiConfigurationChecks(
 
   let probeEnv = providerProbe.env;
   let providerAvailable = true;
+  let remoteCheckDir: string | null = null;
   if (canRunProbe && configuredModel && targetIsRemote && providerProbe.agentConfigDir) {
+    remoteCheckDir = remoteCheckDirectory(target, runId);
     try {
-      const remoteWorkspaceDir = path.posix.join(
-        target.remoteCwd,
-        ".paperclip-runtime",
-        "runs",
-        runId,
-        "workspace",
-      );
+      const remoteWorkspaceDir = path.posix.join(remoteCheckDir, "workspace");
       const preparedRemoteRuntime = await prepareAdapterExecutionTargetRuntime({
         runId,
         target,
@@ -339,95 +372,110 @@ async function runPiConfigurationChecks(
     }
   }
 
-  if (canRunProbe && configuredModel && providerAvailable) {
-    // Parse model for probe
-    const provider = configuredModel.includes("/") 
-      ? configuredModel.slice(0, configuredModel.indexOf("/")) 
-      : "";
-    const modelId = configuredModel.includes("/")
-      ? configuredModel.slice(configuredModel.indexOf("/") + 1)
-      : configuredModel;
-    const thinking = asString(config.thinking, "").trim();
-    const extraArgs = (() => {
-      const fromExtraArgs = asStringArray(config.extraArgs);
-      if (fromExtraArgs.length > 0) return fromExtraArgs;
-      return asStringArray(config.args);
-    })();
+  try {
+    if (canRunProbe && configuredModel && providerAvailable) {
+      const provider = configuredModel.includes("/") 
+        ? configuredModel.slice(0, configuredModel.indexOf("/")) 
+        : "";
+      const modelId = configuredModel.includes("/")
+        ? configuredModel.slice(configuredModel.indexOf("/") + 1)
+        : configuredModel;
+      const thinking = asString(config.thinking, "").trim();
+      const extraArgs = (() => {
+        const fromExtraArgs = asStringArray(config.extraArgs);
+        if (fromExtraArgs.length > 0) return fromExtraArgs;
+        return asStringArray(config.args);
+      })();
 
-    const args = ["-p", "Respond with hello.", "--mode", "json"];
-    if (provider) args.push("--provider", provider);
-    if (modelId) args.push("--model", modelId);
-    if (thinking) args.push("--thinking", thinking);
-    args.push("--tools", "read");
-    if (extraArgs.length > 0) args.push(...extraArgs);
+      const args = ["-p", "Respond with hello.", "--mode", "json"];
+      if (provider) args.push("--provider", provider);
+      if (modelId) args.push("--model", modelId);
+      if (thinking) args.push("--thinking", thinking);
+      args.push("--tools", "read");
+      if (extraArgs.length > 0) args.push(...extraArgs);
 
-    try {
-      const probe = await runAdapterExecutionTargetProcess(
-        runId,
-        target,
-        command,
-        args,
-        {
-          cwd,
-          env: probeEnv,
-          timeoutSec: 60,
-          graceSec: 5,
-          onLog: async () => {},
-        },
-      );
+      try {
+        const probe = await runAdapterExecutionTargetProcess(
+          runId,
+          target,
+          command,
+          args,
+          {
+            cwd,
+            env: probeEnv,
+            timeoutSec: 60,
+            graceSec: 5,
+            onLog: async () => {},
+          },
+        );
 
-      const parsed = parsePiJsonl(probe.stdout);
-      const detail = summarizeProbeDetail(probe.stdout, probe.stderr, parsed.errors[0] ?? null);
-      const authEvidence = `${parsed.errors.join("\n")}\n${probe.stdout}\n${probe.stderr}`.trim();
+        const parsed = parsePiJsonl(probe.stdout);
+        const detail = summarizeProbeDetail(probe.stdout, probe.stderr, parsed.errors[0] ?? null);
+        const authEvidence = `${parsed.errors.join("\n")}\n${probe.stdout}\n${probe.stderr}`.trim();
 
-      if (probe.timedOut) {
-        checks.push({
-          code: "pi_hello_probe_timed_out",
-          level: "warn",
-          message: "Pi hello probe timed out.",
-          hint: "Retry the probe. If this persists, run Pi manually in this working directory.",
-        });
-      } else if ((probe.exitCode ?? 1) === 0 && parsed.errors.length === 0) {
-        const summary = (parsed.finalMessage || parsed.messages.join(" ")).trim();
-        const hasHello = /\bhello\b/i.test(summary);
-        checks.push({
-          code: hasHello ? "pi_hello_probe_passed" : "pi_hello_probe_unexpected_output",
-          level: hasHello ? "info" : "warn",
-          message: hasHello
-            ? "Pi hello probe succeeded."
-            : "Pi probe ran but did not return `hello` as expected.",
-          ...(summary ? { detail: summary.replace(/\s+/g, " ").trim().slice(0, 240) } : {}),
-          ...(hasHello
-            ? {}
-            : {
-                hint: "Run `pi --mode json` manually and prompt `Respond with hello` to inspect output.",
-              }),
-        });
-      } else if (PI_AUTH_REQUIRED_RE.test(authEvidence)) {
-        checks.push({
-          code: "pi_hello_probe_auth_required",
-          level: "warn",
-          message: "Pi is installed, but provider authentication is not ready.",
-          ...(detail ? { detail } : {}),
-          hint: "Set provider API key environment variable (e.g., ANTHROPIC_API_KEY, XAI_API_KEY) and retry.",
-        });
-      } else {
+        if (probe.timedOut) {
+          checks.push({
+            code: "pi_hello_probe_timed_out",
+            level: "warn",
+            message: "Pi hello probe timed out.",
+            hint: "Retry the probe. If this persists, run Pi manually in this working directory.",
+          });
+        } else if ((probe.exitCode ?? 1) === 0 && parsed.errors.length === 0) {
+          const summary = (parsed.finalMessage || parsed.messages.join(" ")).trim();
+          const hasHello = /\bhello\b/i.test(summary);
+          checks.push({
+            code: hasHello ? "pi_hello_probe_passed" : "pi_hello_probe_unexpected_output",
+            level: hasHello ? "info" : "warn",
+            message: hasHello
+              ? "Pi hello probe succeeded."
+              : "Pi probe ran but did not return `hello` as expected.",
+            ...(summary ? { detail: summary.replace(/\s+/g, " ").trim().slice(0, 240) } : {}),
+            ...(hasHello
+              ? {}
+              : {
+                  hint: "Run `pi --mode json` manually and prompt `Respond with hello` to inspect output.",
+                }),
+          });
+        } else if (PI_AUTH_REQUIRED_RE.test(authEvidence)) {
+          checks.push({
+            code: "pi_hello_probe_auth_required",
+            level: "warn",
+            message: "Pi is installed, but provider authentication is not ready.",
+            ...(detail ? { detail } : {}),
+            hint: "Set provider API key environment variable (e.g., ANTHROPIC_API_KEY, XAI_API_KEY) and retry.",
+          });
+        } else {
+          checks.push({
+            code: "pi_hello_probe_failed",
+            level: "error",
+            message: "Pi hello probe failed.",
+            ...(detail ? { detail } : {}),
+            hint: "Run `pi --mode json` manually in this working directory to debug.",
+          });
+        }
+      } catch (err) {
         checks.push({
           code: "pi_hello_probe_failed",
           level: "error",
           message: "Pi hello probe failed.",
-          ...(detail ? { detail } : {}),
+          detail: err instanceof Error ? err.message : String(err),
           hint: "Run `pi --mode json` manually in this working directory to debug.",
         });
       }
-    } catch (err) {
-      checks.push({
-        code: "pi_hello_probe_failed",
-        level: "error",
-        message: "Pi hello probe failed.",
-        detail: err instanceof Error ? err.message : String(err),
-        hint: "Run `pi --mode json` manually in this working directory to debug.",
-      });
+    }
+  } finally {
+    if (remoteCheckDir && target && target.kind === "remote") {
+      try {
+        await removeRemoteCheckDirectory(runId, target, remoteCheckDir);
+      } catch (err) {
+        checks.push({
+          code: "pi_provider_config_cleanup_failed",
+          level: "warn",
+          message: "The staged Pi provider configuration could not be removed from the execution target.",
+          detail: err instanceof Error ? err.message : String(err),
+          hint: "Remove the leftover directory manually when the execution target is a persistent host.",
+        });
+      }
     }
   }
 

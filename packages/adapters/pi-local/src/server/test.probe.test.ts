@@ -5,6 +5,7 @@ import path from "node:path";
 const {
   runChildProcess,
   runAdapterExecutionTargetProcess,
+  runAdapterExecutionTargetShellCommand,
   ensureAdapterExecutionTargetCommandResolvable,
   maybeRunSandboxInstallCommand,
   ensureAdapterExecutionTargetDirectory,
@@ -16,6 +17,8 @@ const {
   stagingFailure,
   prepareFailure,
   preparedRuntimeCalls,
+  remoteShellCommands,
+  remoteShellFailure,
 } = vi.hoisted(() => {
   const listModelsEnv: { value: Record<string, string> | null } = { value: null };
   const probeEnv: { value: Record<string, string> | null } = { value: null };
@@ -26,6 +29,8 @@ const {
   const stagingFailure: { value: Error | null } = { value: null };
   const prepareFailure: { value: Error | null } = { value: null };
   const preparedRuntimeCalls: { value: { workspaceRemoteDir?: string }[] } = { value: [] };
+  const remoteShellCommands: { value: string[] } = { value: [] };
+  const remoteShellFailure: { value: boolean } = { value: false };
   const captureModelsJson = (env: Record<string, string> | null | undefined) => {
     const dir = env?.PI_CODING_AGENT_DIR;
     if (!dir || modelsJsonDuringProbe.value !== null) return;
@@ -43,6 +48,8 @@ const {
     stagingFailure,
     prepareFailure,
     preparedRuntimeCalls,
+    remoteShellCommands,
+    remoteShellFailure,
     runChildProcess: vi.fn(async (_runId: string, _command: string, _args: string[], options: { env?: Record<string, string> }) => {
       listModelsEnv.value = options?.env ?? null;
       captureModelsJson(listModelsEnv.value);
@@ -77,6 +84,18 @@ const {
     ensureAdapterExecutionTargetCommandResolvable: vi.fn(async () => {}),
     maybeRunSandboxInstallCommand: vi.fn(async () => null),
     ensureAdapterExecutionTargetDirectory: vi.fn(async () => {}),
+    runAdapterExecutionTargetShellCommand: vi.fn(async (_runId: string, _target: unknown, command: string) => {
+      remoteShellCommands.value.push(command);
+      return {
+        exitCode: remoteShellFailure.value ? 1 : 0,
+        signal: null,
+        timedOut: false,
+        stdout: "",
+        stderr: remoteShellFailure.value ? "read-only file system" : "",
+        pid: null,
+        startedAt: new Date().toISOString(),
+      };
+    }),
     prepareAdapterExecutionTargetRuntime: vi.fn(async (input: { assets?: { key: string; localDir: string }[]; workspaceRemoteDir?: string }) => {
       preparedRuntimeCalls.value.push({ workspaceRemoteDir: input.workspaceRemoteDir });
       if (stagingFailure.value) throw stagingFailure.value;
@@ -114,6 +133,7 @@ vi.mock("@paperclipai/adapter-utils/execution-target", async () => {
     ensureAdapterExecutionTargetCommandResolvable,
     maybeRunSandboxInstallCommand,
     runAdapterExecutionTargetProcess,
+    runAdapterExecutionTargetShellCommand,
     prepareAdapterExecutionTargetRuntime,
   };
 });
@@ -165,6 +185,8 @@ afterEach(() => {
   stagingFailure.value = null;
   prepareFailure.value = null;
   preparedRuntimeCalls.value = [];
+  remoteShellCommands.value = [];
+  remoteShellFailure.value = false;
 });
 
 describe("pi configuration check", () => {
@@ -319,6 +341,73 @@ describe("pi configuration check", () => {
     expect(dirs[0]).toBeTruthy();
     expect(dirs[0]).toContain(".paperclip-runtime/runs/");
     expect(dirs[1]).not.toBe(dirs[0]);
+  });
+
+  it("removes the staged provider config from the remote target after the probe", async () => {
+    await testEnvironment({
+      companyId: "company-1",
+      adapterType: "pi_local",
+      config: {
+        command: "pi",
+        model: "minimax/MiniMax-M3",
+        env: {
+          ANTHROPIC_API_KEY: "sk-test-key",
+          PAPERCLIP_PI_PROVIDERS: JSON.stringify(PROVIDERS),
+        },
+      },
+      executionTarget: REMOTE_TARGET,
+      environmentName: "Remote build box",
+    });
+
+    expect(remoteShellCommands.value).toHaveLength(1);
+    expect(remoteShellCommands.value[0]).toContain("rm -rf --");
+    expect(remoteShellCommands.value[0]).toContain("/remote/workspace/.paperclip-runtime/runs/");
+  });
+
+  it("removes the remote check directory when the provider config could not be staged", async () => {
+    stagingFailure.value = new Error("staging refused");
+
+    await testEnvironment({
+      companyId: "company-1",
+      adapterType: "pi_local",
+      config: {
+        command: "pi",
+        model: "minimax/MiniMax-M3",
+        env: {
+          ANTHROPIC_API_KEY: "sk-test-key",
+          PAPERCLIP_PI_PROVIDERS: JSON.stringify(PROVIDERS),
+        },
+      },
+      executionTarget: REMOTE_TARGET,
+      environmentName: "Remote build box",
+    });
+
+    expect(remoteShellCommands.value).toHaveLength(1);
+    expect(remoteShellCommands.value[0]).toContain("rm -rf --");
+  });
+
+  it("reports a remote check directory that could not be removed", async () => {
+    remoteShellFailure.value = true;
+
+    const result = await testEnvironment({
+      companyId: "company-1",
+      adapterType: "pi_local",
+      config: {
+        command: "pi",
+        model: "minimax/MiniMax-M3",
+        env: {
+          ANTHROPIC_API_KEY: "sk-test-key",
+          PAPERCLIP_PI_PROVIDERS: JSON.stringify(PROVIDERS),
+        },
+      },
+      executionTarget: REMOTE_TARGET,
+      environmentName: "Remote build box",
+    });
+
+    const check = result.checks.find((entry) => entry.code === "pi_provider_config_cleanup_failed");
+    expect(check?.level).toBe("warn");
+    expect(check?.detail).toContain("read-only file system");
+    expect(result.status).toBe("warn");
   });
 
   it("reports a provider configuration that could not be prepared as a failed check", async () => {
