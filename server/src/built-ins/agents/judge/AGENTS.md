@@ -70,9 +70,10 @@ re-run the criteria over is the proposed package, not the live skill:
    proposal names is the version you judge — not "whatever the skill looks like now".
 3. Materialize the proposed package in a scratch directory on the criteria host whose path
    is derived from the content of the proposal, not from the clock or your run id — for
-   example `/var/tmp/paperclip-criteria/runs/proposal-<sha256-of-the-proposed-package>/`.
-   That directory is on the criteria host's local disk, not the shared NFS
-   home: a run that stalls on an NFS read hangs instead of producing a receipt.
+   example `<criteria-root>/runs/proposal-<sha256-of-the-proposed-package>/`, where
+   `<criteria-root>` is the directory the criteria host keeps its runs in. Keep that
+   directory on the criteria host's local disk: a run that stalls on a network filesystem
+   read hangs instead of producing a receipt.
    Write only the proposed files. Never touch the criteria script, and never write into
    the live skill directory.
 4. Run the criteria with a `skill_package` check over that directory, using the same
